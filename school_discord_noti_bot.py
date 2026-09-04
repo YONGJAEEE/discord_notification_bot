@@ -38,10 +38,6 @@ NOTICE_STATISTICS_CHANNEL_ID = get_required_int_env("NOTICE_STATISTICS_CHANNEL_I
 TARGET_ROLE_IDS = get_required_int_list_env("TARGET_ROLE_IDS")
 STAFF_ROLE_IDS = get_required_int_list_env("STAFF_ROLE_IDS")
 
-# 커스텀 이모지
-NOTICE_REACTION_EMOJI_NAME = "gachon"
-NOTICE_REACTION_EMOJI_ID = 1019827185676197918
-
 @bot.event
 async def on_ready():
     print(f'{bot.user} 이 활성화 되었습니다!')
@@ -60,7 +56,7 @@ async def notice(ctx, message_id: typing.Optional[int], *, message_content):
         await ctx.send(f"{message_content.splitlines()[0]} 공지의 메시지 ID: {notice_message.id}")
         
         # 커스텀 이모지 사용하도록 설정
-        emoji = f"<:{NOTICE_REACTION_EMOJI_NAME}:{NOTICE_REACTION_EMOJI_ID}>"
+        emoji = "<:gachon:1019827185676197918>"
         await notice_message.add_reaction(emoji)
     else:
         # 기존 공지 수정 로직
@@ -76,10 +72,7 @@ async def notice(ctx, message_id: typing.Optional[int], *, message_content):
 
     # 메시지 리액션 추가한 챌린저 확인
     notice_message = await challenger_notice_channel.fetch_message(notice_message.id)
-    reaction = discord.utils.get(
-        notice_message.reactions,
-        emoji=discord.PartialEmoji(name=NOTICE_REACTION_EMOJI_NAME, id=NOTICE_REACTION_EMOJI_ID),
-    )
+    reaction = discord.utils.get(notice_message.reactions, emoji=discord.PartialEmoji(name="gachon", id=1019827185676197918))
 
     if reaction is not None:
         users_who_reacted = [user async for user in reaction.users() if not user.bot]
@@ -129,7 +122,7 @@ async def check(ctx, message_id: int):
         users_who_reacted = []
         for reaction in notice_message.reactions:
             # 커스텀 이모지 확인 - ID로 정확하게 확인
-            if hasattr(reaction.emoji, 'id') and reaction.emoji.id == NOTICE_REACTION_EMOJI_ID:
+            if hasattr(reaction.emoji, 'id') and reaction.emoji.id == 1019827185676197918:
                 async for user in reaction.users():
                     if not user.bot:
                         users_who_reacted.append(user)
