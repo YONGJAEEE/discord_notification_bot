@@ -3,8 +3,19 @@ from discord.ext import commands
 import asyncio
 import os
 import typing
+from datetime import datetime
+
 from dm_sender import send_direct_message
 from env_loader import load_env_file
+from spreadsheet_store import (
+    add_scheduled_notice,
+    add_score,
+    find_member,
+    get_next_pending_scheduled_notice_time,
+    get_pending_scheduled_notices,
+    sync_members,
+    update_scheduled_notice_status,
+)
 
 
 load_env_file()
@@ -31,6 +42,7 @@ intents.reactions = True
 intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+scheduled_notice_task = None
 
 DISCORD_BOT_TOKEN = get_required_env("DISCORD_BOT_TOKEN")
 
@@ -38,14 +50,97 @@ DISCORD_BOT_TOKEN = get_required_env("DISCORD_BOT_TOKEN")
 BOT_NOTICE_CHANNEL_ID = get_required_int_env("BOT_NOTICE_CHANNEL_ID")
 CHALLENGER_NOTICE_CHANNEL_ID = get_required_int_env("CHALLENGER_NOTICE_CHANNEL_ID")
 NOTICE_STATISTICS_CHANNEL_ID = get_required_int_env("NOTICE_STATISTICS_CHANNEL_ID")
+SCORE_COMMAND_CHANNEL_ID = get_required_int_env("SCORE_COMMAND_CHANNEL_ID")
 
 # 역할 ID
 TARGET_ROLE_IDS = get_required_int_list_env("TARGET_ROLE_IDS")
 STAFF_ROLE_IDS = get_required_int_list_env("STAFF_ROLE_IDS")
+SCHEDULED_NOTICE_MAX_SLEEP_SECONDS = int(os.getenv("SCHEDULED_NOTICE_MAX_SLEEP_SECONDS", "30"))
 
 @bot.event
 async def on_ready():
+    global scheduled_notice_task
+
     print(f'{bot.user} 이 활성화 되었습니다!')
+
+    if scheduled_notice_task is None or scheduled_notice_task.done():
+        scheduled_notice_task = asyncio.create_task(scheduled_notice_loop())
+
+
+async def scheduled_notice_loop():
+    await bot.wait_until_ready()
+
+    while not bot.is_closed():
+        try:
+            await send_due_scheduled_notices()
+            sleep_seconds = await get_scheduled_notice_sleep_seconds()
+        except Exception as error:
+            print(f"예약 공지 확인 중 오류가 발생했습니다: {error}")
+            sleep_seconds = SCHEDULED_NOTICE_MAX_SLEEP_SECONDS
+
+        await asyncio.sleep(sleep_seconds)
+
+
+async def send_due_scheduled_notices():
+    now = datetime.now()
+    pending_notices = await asyncio.to_thread(get_pending_scheduled_notices, now)
+
+    if not pending_notices:
+        return
+
+    challenger_notice_channel = bot.get_channel(CHALLENGER_NOTICE_CHANNEL_ID)
+    if challenger_notice_channel is None:
+        raise RuntimeError("챌린저_공지 채널을 찾을 수 없습니다.")
+
+    bot_notice_channel = bot.get_channel(BOT_NOTICE_CHANNEL_ID)
+
+    for row_index, scheduled_notice in pending_notices:
+        try:
+            await asyncio.to_thread(
+                update_scheduled_notice_status,
+                row_index,
+                "sending",
+            )
+            notice_message = await challenger_notice_channel.send(scheduled_notice["content"])
+            await notice_message.add_reaction("<:gachon:1019827185676197918>")
+            await asyncio.to_thread(
+                update_scheduled_notice_status,
+                row_index,
+                "sent",
+                str(notice_message.id),
+                "",
+            )
+            first_line = get_first_line(scheduled_notice["content"])
+            if bot_notice_channel is not None:
+                await bot_notice_channel.send(
+                    f"예약 공지 #{scheduled_notice['id']} 발송 완료\n"
+                    f"메시지 ID: {notice_message.id}\n"
+                    f"> {first_line}"
+                )
+        except Exception as error:
+            await asyncio.to_thread(
+                update_scheduled_notice_status,
+                row_index,
+                "failed",
+                "",
+                str(error),
+            )
+
+
+async def get_scheduled_notice_sleep_seconds():
+    now = datetime.now()
+    next_send_at = await asyncio.to_thread(get_next_pending_scheduled_notice_time, now)
+
+    if next_send_at is None:
+        return SCHEDULED_NOTICE_MAX_SLEEP_SECONDS
+
+    delay = max((next_send_at - now).total_seconds(), 0)
+    return min(delay, SCHEDULED_NOTICE_MAX_SLEEP_SECONDS)
+
+
+def get_first_line(message_content):
+    lines = str(message_content).splitlines()
+    return lines[0] if lines else ""
 
 
 def can_send_dm(member):
@@ -63,6 +158,111 @@ async def dm(ctx, target: discord.User, *, message_content):
 
     _success, response = await send_direct_message(bot, target.id, message_content)
     await ctx.send(response)
+
+
+@bot.command(name='sync-members')
+async def sync_members_command(ctx):
+    if ctx.channel.id != SCORE_COMMAND_CHANNEL_ID:
+        await ctx.send("멤버 동기화 명령어는 지정된 상/벌점 채널에서만 사용할 수 있습니다.")
+        return
+
+    if not can_send_dm(ctx.author):
+        await ctx.send("멤버 동기화 권한이 없습니다.")
+        return
+
+    target_members_by_id = {}
+
+    for role_id in TARGET_ROLE_IDS:
+        target_role = ctx.guild.get_role(role_id)
+        if target_role is None:
+            continue
+
+        for member in target_role.members:
+            if member.bot:
+                continue
+
+            target_members_by_id[member.id] = {
+                "user_id": member.id,
+                "display_name": member.display_name,
+                "name": str(member),
+                "roles": [
+                    role.name
+                    for role in member.roles
+                    if role.id in TARGET_ROLE_IDS
+                ],
+            }
+
+    saved_count = await asyncio.to_thread(sync_members, list(target_members_by_id.values()))
+    await ctx.send(f"대상 역할 멤버 {saved_count}명을 스프레드시트에 저장했습니다.")
+
+
+@bot.command(name='score')
+async def score(ctx, member_key: str, points: int, *, reason):
+    if ctx.channel.id != SCORE_COMMAND_CHANNEL_ID:
+        await ctx.send("상/벌점 명령어는 지정된 채널에서만 사용할 수 있습니다.")
+        return
+
+    if not can_send_dm(ctx.author):
+        await ctx.send("상/벌점 부여 권한이 없습니다.")
+        return
+
+    if points == 0:
+        await ctx.send("점수는 + 또는 - 값으로 입력해주세요.")
+        return
+
+    matched_members = await asyncio.to_thread(find_member, member_key)
+
+    if not matched_members:
+        await ctx.send("스프레드시트에서 대상 멤버를 찾을 수 없습니다. 먼저 !sync-members를 실행해주세요.")
+        return
+
+    if len(matched_members) > 1:
+        names = ", ".join(member["display_name"] for member in matched_members)
+        await ctx.send(f"동명이인이 있습니다. 사용자 ID로 다시 입력해주세요: {names}")
+        return
+
+    member = matched_members[0]
+    new_score = await asyncio.to_thread(
+        add_score,
+        member,
+        points,
+        reason,
+        str(ctx.author),
+    )
+
+    score_type = "상점" if points > 0 else "벌점"
+    dm_content = (
+        f"{score_type} {points:+d}점이 부여되었습니다.\n"
+        f"사유: {reason}\n"
+        f"현재 점수: {new_score:+d}점"
+    )
+    _success, response = await send_direct_message(bot, int(member["user_id"]), dm_content)
+    await ctx.send(f"{member['display_name']} 님에게 {score_type} {points:+d}점을 반영했습니다. {response}")
+
+
+@bot.command(name='notice-schd')
+async def notice_schd(ctx, year: int, month: int, day: int, hour: int, minute: int, *, message_content):
+    if not can_send_dm(ctx.author):
+        await ctx.send("예약 공지 등록 권한이 없습니다.")
+        return
+
+    try:
+        send_at = datetime(year, month, day, hour, minute)
+    except ValueError:
+        await ctx.send("예약 날짜/시간 형식이 올바르지 않습니다.")
+        return
+
+    if send_at <= datetime.now():
+        await ctx.send("현재보다 이후 시간으로 예약해주세요.")
+        return
+
+    scheduled_notice_id = await asyncio.to_thread(
+        add_scheduled_notice,
+        send_at,
+        message_content,
+        str(ctx.author),
+    )
+    await ctx.send(f"예약 공지 #{scheduled_notice_id} 등록 완료: {send_at:%Y-%m-%d %H:%M}")
 
 
 @bot.command(name='notice')
