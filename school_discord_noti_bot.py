@@ -1,7 +1,24 @@
 import discord
 from discord.ext import commands
 import asyncio
+import os
 import typing
+
+
+def get_required_env(name):
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(f"{name} 환경변수가 설정되지 않았습니다.")
+    return value
+
+
+def get_required_int_env(name):
+    return int(get_required_env(name))
+
+
+def get_required_int_list_env(name):
+    value = get_required_env(name)
+    return [int(item.strip()) for item in value.split(",") if item.strip()]
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -10,23 +27,20 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# 채널 ID 저장
-BOT_NOTICE_CHANNEL_ID = 1545372270309015572       # 봇_공지 채널 ID
-CHALLENGER_NOTICE_CHANNEL_ID = 1545348410104614924  # 챌린저_공지 채널 ID
-NOTICE_STATISTICS_CHANNEL_ID = 1545377614472945734  # 공지_통계 채널 ID
+DISCORD_BOT_TOKEN = get_required_env("DISCORD_BOT_TOKEN")
 
-# 특정 역할 ID를 저장
-TARGET_ROLE_IDS = [
-    1011181145636995094,  # P.E(WEB)
-    1011181145636995095,  # P.E(MOBILE)
-    1019173929702658081,  # 디자인
-    1078267792572297266   # 플랜
-]
+# 채널 ID
+BOT_NOTICE_CHANNEL_ID = get_required_int_env("BOT_NOTICE_CHANNEL_ID")
+CHALLENGER_NOTICE_CHANNEL_ID = get_required_int_env("CHALLENGER_NOTICE_CHANNEL_ID")
+NOTICE_STATISTICS_CHANNEL_ID = get_required_int_env("NOTICE_STATISTICS_CHANNEL_ID")
 
-# 운영진 역할 ID 저장
-STAFF_ROLE_IDS = [
-    1011181145636995099
-]
+# 역할 ID
+TARGET_ROLE_IDS = get_required_int_list_env("TARGET_ROLE_IDS")
+STAFF_ROLE_IDS = get_required_int_list_env("STAFF_ROLE_IDS")
+
+# 커스텀 이모지
+NOTICE_REACTION_EMOJI_NAME = "gachon"
+NOTICE_REACTION_EMOJI_ID = 1019827185676197918
 
 @bot.event
 async def on_ready():
@@ -46,7 +60,7 @@ async def notice(ctx, message_id: typing.Optional[int], *, message_content):
         await ctx.send(f"{message_content.splitlines()[0]} 공지의 메시지 ID: {notice_message.id}")
         
         # 커스텀 이모지 사용하도록 설정
-        emoji = "<:gachon:1019827185676197918>"
+        emoji = f"<:{NOTICE_REACTION_EMOJI_NAME}:{NOTICE_REACTION_EMOJI_ID}>"
         await notice_message.add_reaction(emoji)
     else:
         # 기존 공지 수정 로직
@@ -62,7 +76,10 @@ async def notice(ctx, message_id: typing.Optional[int], *, message_content):
 
     # 메시지 리액션 추가한 챌린저 확인
     notice_message = await challenger_notice_channel.fetch_message(notice_message.id)
-    reaction = discord.utils.get(notice_message.reactions, emoji=discord.PartialEmoji(name="gachon", id=1019827185676197918))
+    reaction = discord.utils.get(
+        notice_message.reactions,
+        emoji=discord.PartialEmoji(name=NOTICE_REACTION_EMOJI_NAME, id=NOTICE_REACTION_EMOJI_ID),
+    )
 
     if reaction is not None:
         users_who_reacted = [user async for user in reaction.users() if not user.bot]
@@ -98,7 +115,8 @@ async def notice(ctx, message_id: typing.Optional[int], *, message_content):
         response = f"🔴 {first_line}\n## 미응답자 목록\n> {non_reactors_list}"
         await statistics_channel.send(response)
     else:
-        await statistics_channel.send("🔵 모든 특정 역할의 사용자가 이모지를 달았습니다.")
+        response = f"🔵 {first_line}\n> 모든 특정 역할의 사용자가 이모지를 달았습니다."
+        await statistics_channel.send(response)
 
 @bot.command(name='check')
 async def check(ctx, message_id: int):
@@ -111,7 +129,7 @@ async def check(ctx, message_id: int):
         users_who_reacted = []
         for reaction in notice_message.reactions:
             # 커스텀 이모지 확인 - ID로 정확하게 확인
-            if hasattr(reaction.emoji, 'id') and reaction.emoji.id == 1019827185676197918:
+            if hasattr(reaction.emoji, 'id') and reaction.emoji.id == NOTICE_REACTION_EMOJI_ID:
                 async for user in reaction.users():
                     if not user.bot:
                         users_who_reacted.append(user)
@@ -146,12 +164,12 @@ async def check(ctx, message_id: int):
             response = f"🔴 {first_line}\n## 미응답자 목록\n> {non_reactors_list}"
             await statistics_channel.send(response)
         else:
-            await statistics_channel.send("🔵 모든 특정 역할의 사용자가 이모지를 달았습니다.")
+            response = f"🔵 {first_line}\n> 모든 특정 역할의 사용자가 이모지를 달았습니다."
+            await statistics_channel.send(response)
             
         await ctx.send("리액션 확인 완료!")
         
     except discord.NotFound:
         await ctx.send(f"메시지 {message_id}를 찾을 수 없습니다.")
 
-# '' 안에 디스코드 봇 토큰 추가
-bot.run('YOUR_DISCORD_BOT_TOKEN')
+bot.run(DISCORD_BOT_TOKEN)
