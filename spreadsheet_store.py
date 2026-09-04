@@ -197,7 +197,7 @@ def add_scheduled_notice(send_at, content, created_by):
     return next_id
 
 
-def get_pending_scheduled_notices(now):
+def get_pending_scheduled_notices():
     worksheets = get_worksheets()
     rows = worksheets[SCHEDULED_NOTICES_SHEET_NAME].get_all_records()
     pending = []
@@ -206,34 +206,30 @@ def get_pending_scheduled_notices(now):
         if str(row.get("status", "")).strip().lower() != "pending":
             continue
 
-        send_at = parse_scheduled_notice_time(row["send_at"])
-        if send_at <= now:
-            pending.append((index, row))
+        pending.append((index, row))
 
     return pending
 
 
-def get_next_pending_scheduled_notice_time(now):
-    worksheets = get_worksheets()
-    rows = worksheets[SCHEDULED_NOTICES_SHEET_NAME].get_all_records()
-    next_send_at = None
-
-    for row in rows:
-        if str(row.get("status", "")).strip().lower() != "pending":
-            continue
-
-        send_at = parse_scheduled_notice_time(row["send_at"])
-        if send_at <= now:
-            return now
-
-        if next_send_at is None or send_at < next_send_at:
-            next_send_at = send_at
-
-    return next_send_at
-
-
 def parse_scheduled_notice_time(value):
     return datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S")
+
+
+def update_scheduled_notice_status_by_id(scheduled_notice_id, status, sent_message_id="", error=""):
+    worksheets = get_worksheets()
+    worksheet = worksheets[SCHEDULED_NOTICES_SHEET_NAME]
+    rows = worksheet.get_all_records()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    for index, row in enumerate(rows, start=2):
+        if str(row.get("id")) == str(scheduled_notice_id):
+            worksheet.update_cell(index, SCHEDULED_NOTICES_HEADERS.index("status") + 1, status)
+            worksheet.update_cell(index, SCHEDULED_NOTICES_HEADERS.index("sent_at") + 1, now)
+            worksheet.update_cell(index, SCHEDULED_NOTICES_HEADERS.index("sent_message_id") + 1, sent_message_id)
+            worksheet.update_cell(index, SCHEDULED_NOTICES_HEADERS.index("error") + 1, error)
+            return True
+
+    return False
 
 
 def update_scheduled_notice_status(row_index, status, sent_message_id="", error=""):

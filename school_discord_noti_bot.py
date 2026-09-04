@@ -11,10 +11,10 @@ from spreadsheet_store import (
     add_scheduled_notice,
     add_score,
     find_member,
-    get_next_pending_scheduled_notice_time,
     get_pending_scheduled_notices,
+    parse_scheduled_notice_time,
     sync_members,
-    update_scheduled_notice_status,
+    update_scheduled_notice_status_by_id,
 )
 
 
@@ -42,7 +42,7 @@ intents.reactions = True
 intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
-scheduled_notice_task = None
+scheduled_notice_tasks = {}
 
 DISCORD_BOT_TOKEN = get_required_env("DISCORD_BOT_TOKEN")
 
@@ -55,87 +55,88 @@ SCORE_COMMAND_CHANNEL_ID = get_required_int_env("SCORE_COMMAND_CHANNEL_ID")
 # 역할 ID
 TARGET_ROLE_IDS = get_required_int_list_env("TARGET_ROLE_IDS")
 STAFF_ROLE_IDS = get_required_int_list_env("STAFF_ROLE_IDS")
-SCHEDULED_NOTICE_MAX_SLEEP_SECONDS = int(os.getenv("SCHEDULED_NOTICE_MAX_SLEEP_SECONDS", "30"))
 
 @bot.event
 async def on_ready():
-    global scheduled_notice_task
-
     print(f'{bot.user} 이 활성화 되었습니다!')
-
-    if scheduled_notice_task is None or scheduled_notice_task.done():
-        scheduled_notice_task = asyncio.create_task(scheduled_notice_loop())
+    await restore_scheduled_notice_tasks()
 
 
-async def scheduled_notice_loop():
-    await bot.wait_until_ready()
-
-    while not bot.is_closed():
-        try:
-            await send_due_scheduled_notices()
-            sleep_seconds = await get_scheduled_notice_sleep_seconds()
-        except Exception as error:
-            print(f"예약 공지 확인 중 오류가 발생했습니다: {error}")
-            sleep_seconds = SCHEDULED_NOTICE_MAX_SLEEP_SECONDS
-
-        await asyncio.sleep(sleep_seconds)
-
-
-async def send_due_scheduled_notices():
-    now = datetime.now()
-    pending_notices = await asyncio.to_thread(get_pending_scheduled_notices, now)
-
-    if not pending_notices:
+async def restore_scheduled_notice_tasks():
+    try:
+        pending_notices = await asyncio.to_thread(get_pending_scheduled_notices)
+    except Exception as error:
+        print(f"예약 공지 복구 중 오류가 발생했습니다: {error}")
         return
 
-    challenger_notice_channel = bot.get_channel(CHALLENGER_NOTICE_CHANNEL_ID)
-    if challenger_notice_channel is None:
-        raise RuntimeError("챌린저_공지 채널을 찾을 수 없습니다.")
-
-    bot_notice_channel = bot.get_channel(BOT_NOTICE_CHANNEL_ID)
-
-    for row_index, scheduled_notice in pending_notices:
+    for _row_index, scheduled_notice in pending_notices:
         try:
-            await asyncio.to_thread(
-                update_scheduled_notice_status,
-                row_index,
-                "sending",
-            )
-            notice_message = await challenger_notice_channel.send(scheduled_notice["content"])
-            await notice_message.add_reaction("<:gachon:1019827185676197918>")
-            await asyncio.to_thread(
-                update_scheduled_notice_status,
-                row_index,
-                "sent",
-                str(notice_message.id),
-                "",
-            )
-            first_line = get_first_line(scheduled_notice["content"])
-            if bot_notice_channel is not None:
-                await bot_notice_channel.send(
-                    f"예약 공지 #{scheduled_notice['id']} 발송 완료\n"
-                    f"메시지 ID: {notice_message.id}\n"
-                    f"> {first_line}"
-                )
+            scheduled_notice_id = int(scheduled_notice["id"])
+            send_at = parse_scheduled_notice_time(scheduled_notice["send_at"])
+            schedule_notice_task(scheduled_notice_id, send_at, scheduled_notice["content"])
         except Exception as error:
-            await asyncio.to_thread(
-                update_scheduled_notice_status,
-                row_index,
-                "failed",
-                "",
-                str(error),
+            print(f"예약 공지 #{scheduled_notice.get('id')} 복구 중 오류가 발생했습니다: {error}")
+
+
+def schedule_notice_task(scheduled_notice_id, send_at, message_content):
+    existing_task = scheduled_notice_tasks.get(scheduled_notice_id)
+    if existing_task is not None and not existing_task.done():
+        return
+
+    scheduled_notice_tasks[scheduled_notice_id] = asyncio.create_task(
+        run_scheduled_notice(scheduled_notice_id, send_at, message_content)
+    )
+
+
+async def run_scheduled_notice(scheduled_notice_id, send_at, message_content):
+    try:
+        delay = max((send_at - datetime.now()).total_seconds(), 0)
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+        await send_scheduled_notice(scheduled_notice_id, message_content)
+    finally:
+        scheduled_notice_tasks.pop(scheduled_notice_id, None)
+
+
+async def send_scheduled_notice(scheduled_notice_id, message_content):
+    try:
+        await asyncio.to_thread(
+            update_scheduled_notice_status_by_id,
+            scheduled_notice_id,
+            "sending",
+        )
+
+        challenger_notice_channel = bot.get_channel(CHALLENGER_NOTICE_CHANNEL_ID)
+        if challenger_notice_channel is None:
+            raise RuntimeError("챌린저_공지 채널을 찾을 수 없습니다.")
+
+        bot_notice_channel = bot.get_channel(BOT_NOTICE_CHANNEL_ID)
+
+        notice_message = await challenger_notice_channel.send(message_content)
+        await notice_message.add_reaction("<:gachon:1019827185676197918>")
+        await asyncio.to_thread(
+            update_scheduled_notice_status_by_id,
+            scheduled_notice_id,
+            "sent",
+            str(notice_message.id),
+            "",
+        )
+        first_line = get_first_line(message_content)
+        if bot_notice_channel is not None:
+            await bot_notice_channel.send(
+                f"예약 공지 #{scheduled_notice_id} 발송 완료\n"
+                f"메시지 ID: {notice_message.id}\n"
+                f"> {first_line}"
             )
-
-
-async def get_scheduled_notice_sleep_seconds():
-    now = datetime.now()
-    next_send_at = await asyncio.to_thread(get_next_pending_scheduled_notice_time, now)
-
-    if next_send_at is None:
-        return SCHEDULED_NOTICE_MAX_SLEEP_SECONDS
-
-    delay = max((next_send_at - now).total_seconds(), 0)
-    return min(delay, SCHEDULED_NOTICE_MAX_SLEEP_SECONDS)
+    except Exception as error:
+        await asyncio.to_thread(
+            update_scheduled_notice_status_by_id,
+            scheduled_notice_id,
+            "failed",
+            "",
+            str(error),
+        )
 
 
 def get_first_line(message_content):
@@ -148,16 +149,6 @@ def can_send_dm(member):
         return True
 
     return any(role.id in STAFF_ROLE_IDS for role in member.roles)
-
-
-@bot.command(name='dm')
-async def dm(ctx, target: discord.User, *, message_content):
-    if not can_send_dm(ctx.author):
-        await ctx.send("DM 전송 권한이 없습니다.")
-        return
-
-    _success, response = await send_direct_message(bot, target.id, message_content)
-    await ctx.send(response)
 
 
 @bot.command(name='sync-members')
@@ -262,6 +253,7 @@ async def notice_schd(ctx, year: int, month: int, day: int, hour: int, minute: i
         message_content,
         str(ctx.author),
     )
+    schedule_notice_task(scheduled_notice_id, send_at, message_content)
     await ctx.send(f"예약 공지 #{scheduled_notice_id} 등록 완료: {send_at:%Y-%m-%d %H:%M}")
 
 
