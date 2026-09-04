@@ -3,6 +3,11 @@ from discord.ext import commands
 import asyncio
 import os
 import typing
+from dm_sender import send_direct_message
+from env_loader import load_env_file
+
+
+load_env_file()
 
 
 def get_required_env(name):
@@ -41,6 +46,24 @@ STAFF_ROLE_IDS = get_required_int_list_env("STAFF_ROLE_IDS")
 @bot.event
 async def on_ready():
     print(f'{bot.user} 이 활성화 되었습니다!')
+
+
+def can_send_dm(member):
+    if member.guild_permissions.administrator:
+        return True
+
+    return any(role.id in STAFF_ROLE_IDS for role in member.roles)
+
+
+@bot.command(name='dm')
+async def dm(ctx, target: discord.User, *, message_content):
+    if not can_send_dm(ctx.author):
+        await ctx.send("DM 전송 권한이 없습니다.")
+        return
+
+    _success, response = await send_direct_message(bot, target.id, message_content)
+    await ctx.send(response)
+
 
 @bot.command(name='notice')
 async def notice(ctx, message_id: typing.Optional[int], *, message_content):
