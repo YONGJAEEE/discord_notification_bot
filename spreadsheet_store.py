@@ -25,6 +25,8 @@ SCORES_HEADERS = [
     "points",
     "reason",
     "created_by",
+    "dm_status",
+    "dm_error",
 ]
 SCHEDULED_NOTICES_HEADERS = [
     "id",
@@ -154,6 +156,7 @@ def add_score(member, points, reason, created_by):
     members_worksheet = worksheets[MEMBERS_SHEET_NAME]
     scores_worksheet = worksheets[SCORES_SHEET_NAME]
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    score_row_index = len(scores_worksheet.get_all_values()) + 1
 
     scores_worksheet.append_row([
         now,
@@ -162,6 +165,8 @@ def add_score(member, points, reason, created_by):
         points,
         reason,
         created_by,
+        "pending",
+        "",
     ])
 
     rows = members_worksheet.get_all_records()
@@ -171,9 +176,20 @@ def add_score(member, points, reason, created_by):
             new_score = current_score + points
             members_worksheet.update_cell(index, MEMBERS_HEADERS.index("score") + 1, new_score)
             members_worksheet.update_cell(index, MEMBERS_HEADERS.index("updated_at") + 1, now)
-            return new_score
+            return new_score, score_row_index
 
-    return points
+    return points, score_row_index
+
+
+def update_score_dm_result(row_index, success, message):
+    worksheets = get_worksheets()
+    worksheet = worksheets[SCORES_SHEET_NAME]
+    status = "sent" if success else "failed"
+    error = "" if success else message
+
+    worksheet.update_cell(row_index, SCORES_HEADERS.index("dm_status") + 1, status)
+    worksheet.update_cell(row_index, SCORES_HEADERS.index("dm_error") + 1, error)
+    return True
 
 
 def reset_score(member, created_by):
@@ -200,6 +216,8 @@ def reset_score(member, created_by):
         reset_delta,
         "점수 초기화",
         created_by,
+        "not_sent",
+        "",
     ])
 
     if member_row_index is not None:

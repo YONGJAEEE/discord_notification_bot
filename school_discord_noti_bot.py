@@ -16,6 +16,7 @@ from spreadsheet_store import (
     parse_scheduled_notice_time,
     reset_score,
     sync_members,
+    update_score_dm_result,
     update_scheduled_notice_status_by_id,
 )
 
@@ -392,7 +393,7 @@ async def handle_score_command(ctx, member_key, points, reason, expected_score_t
     if member is None:
         return
 
-    _new_score = await asyncio.to_thread(
+    _new_score, score_row_index = await asyncio.to_thread(
         add_score,
         member,
         points,
@@ -402,7 +403,8 @@ async def handle_score_command(ctx, member_key, points, reason, expected_score_t
 
     score_type = "상점" if points > 0 else "벌점"
     dm_content = build_score_dm_content(member["display_name"], points, reason, dm_reason)
-    _success, response = await send_direct_message(bot, int(member["user_id"]), dm_content)
+    success, response = await send_direct_message(bot, int(member["user_id"]), dm_content)
+    await asyncio.to_thread(update_score_dm_result, score_row_index, success, response)
     await ctx.send(f"{member['display_name']} 님에게 {score_type} {points:+d}점을 반영했습니다. {response}")
 
 
