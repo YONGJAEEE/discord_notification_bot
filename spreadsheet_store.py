@@ -176,6 +176,39 @@ def add_score(member, points, reason, created_by):
     return points
 
 
+def reset_score(member, created_by):
+    worksheets = get_worksheets()
+    members_worksheet = worksheets[MEMBERS_SHEET_NAME]
+    scores_worksheet = worksheets[SCORES_SHEET_NAME]
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    rows = members_worksheet.get_all_records()
+    current_score = 0
+    member_row_index = None
+
+    for index, row in enumerate(rows, start=2):
+        if str(row.get("user_id")) == str(member["user_id"]):
+            current_score = int(row.get("score") or 0)
+            member_row_index = index
+            break
+
+    reset_delta = -current_score
+    scores_worksheet.append_row([
+        now,
+        member["user_id"],
+        member["display_name"],
+        reset_delta,
+        "점수 초기화",
+        created_by,
+    ])
+
+    if member_row_index is not None:
+        members_worksheet.update_cell(member_row_index, MEMBERS_HEADERS.index("score") + 1, 0)
+        members_worksheet.update_cell(member_row_index, MEMBERS_HEADERS.index("updated_at") + 1, now)
+
+    return current_score
+
+
 def add_scheduled_notice(send_at, content, created_by):
     worksheets = get_worksheets()
     worksheet = worksheets[SCHEDULED_NOTICES_SHEET_NAME]

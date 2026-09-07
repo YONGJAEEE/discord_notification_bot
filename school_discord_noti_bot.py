@@ -14,6 +14,7 @@ from spreadsheet_store import (
     find_member,
     get_pending_scheduled_notices,
     parse_scheduled_notice_time,
+    reset_score,
     sync_members,
     update_scheduled_notice_status_by_id,
 )
@@ -387,18 +388,10 @@ async def handle_score_command(ctx, member_key, points, reason, expected_score_t
         await ctx.send("벌점은 - 점수로 입력해주세요. 예: !벌점 맹덕 5주차 미션 미제출 -4점")
         return
 
-    matched_members = await asyncio.to_thread(find_member, member_key)
-
-    if not matched_members:
-        await ctx.send("스프레드시트에서 대상 멤버를 찾을 수 없습니다. 먼저 !sync-members를 실행해주세요.")
+    member = await find_one_member_for_score(ctx, member_key)
+    if member is None:
         return
 
-    if len(matched_members) > 1:
-        names = ", ".join(member["display_name"] for member in matched_members)
-        await ctx.send(f"동명이인이 있습니다. 사용자 ID로 다시 입력해주세요: {names}")
-        return
-
-    member = matched_members[0]
     _new_score = await asyncio.to_thread(
         add_score,
         member,
@@ -411,6 +404,21 @@ async def handle_score_command(ctx, member_key, points, reason, expected_score_t
     dm_content = build_score_dm_content(member["display_name"], points, reason, dm_reason)
     _success, response = await send_direct_message(bot, int(member["user_id"]), dm_content)
     await ctx.send(f"{member['display_name']} 님에게 {score_type} {points:+d}점을 반영했습니다. {response}")
+
+
+async def find_one_member_for_score(ctx, member_key):
+    matched_members = await asyncio.to_thread(find_member, member_key)
+
+    if not matched_members:
+        await ctx.send("스프레드시트에서 대상 멤버를 찾을 수 없습니다. 먼저 !sync-members를 실행해주세요.")
+        return None
+
+    if len(matched_members) > 1:
+        names = ", ".join(member["display_name"] for member in matched_members)
+        await ctx.send(f"동명이인이 있습니다. 사용자 ID로 다시 입력해주세요: {names}")
+        return None
+
+    return matched_members[0]
 
 
 async def handle_fixed_score_command(ctx, member_key: str, *, extra=""):
@@ -500,6 +508,31 @@ async def bonus_score(ctx, *args):
 @bot.command(name='벌점')
 async def penalty_score(ctx, *args):
     await ctx.send("벌점은 항목별 명령어로만 부여할 수 있습니다.\n" + get_score_command_usage())
+
+
+@bot.command(name='점수초기화')
+async def reset_member_score(ctx, member_key: str, *, extra=""):
+    if ctx.channel.id != SCORE_COMMAND_CHANNEL_ID:
+        await ctx.send("점수 초기화 명령어는 지정된 상/벌점 채널에서만 사용할 수 있습니다.")
+        return
+
+    if not can_send_dm(ctx.author):
+        await ctx.send("점수 초기화 권한이 없습니다.")
+        return
+
+    if extra.strip():
+        await ctx.send("점수 초기화 명령어는 대상자만 입력해주세요. 예: !점수초기화 맹덕/이용재")
+        return
+
+    member = await find_one_member_for_score(ctx, member_key)
+    if member is None:
+        return
+
+    previous_score = await asyncio.to_thread(reset_score, member, str(ctx.author))
+    await ctx.send(
+        f"{member['display_name']} 님의 점수를 초기화했습니다. "
+        f"이전 점수: {previous_score:+d}점, 현재 점수: +0점"
+    )
 
 
 @bot.command(name='notice-schd')
