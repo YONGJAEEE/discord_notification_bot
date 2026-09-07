@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 import asyncio
 import os
+import re
 import typing
 from datetime import datetime
 
@@ -151,6 +152,143 @@ def can_send_dm(member):
     return any(role.id in STAFF_ROLE_IDS for role in member.roles)
 
 
+def build_score_dm_content(display_name, points, reason):
+    if points > 0:
+        return (
+            f"안녕하세요 `{display_name}`, UMC 운영진입니다.\n"
+            f"{reason}에 선정되어, 상점 {points}점을 부여합니다.\n"
+            "감사합니다."
+        )
+
+    return (
+        f"안녕하세요 `{display_name}`, UMC 운영진입니다.\n"
+        f"`{reason}`로 인한 감점 `{points}점`을 안내드립니다.\n"
+        "감사합니다."
+    )
+
+
+def parse_score_text(score_text):
+    match = re.fullmatch(r"([+-]?\d+)점?", score_text.strip())
+    if match is None:
+        raise ValueError("점수는 +2점 또는 -4점처럼 입력해주세요.")
+
+    points = int(match.group(1))
+    if points == 0:
+        raise ValueError("점수는 + 또는 - 값으로 입력해주세요.")
+
+    return points
+
+
+def parse_reason_and_points(reason_and_points):
+    parts = reason_and_points.rsplit(maxsplit=1)
+    if len(parts) != 2:
+        raise ValueError("사유와 점수를 함께 입력해주세요. 예: !상점 맹덕 2주차 베스트 워크북 +2점")
+
+    reason, score_text = parts
+    return reason, parse_score_text(score_text)
+
+
+def parse_scheduled_notice_command_time(date_text, time_text):
+    now = datetime.now()
+    date_text = date_text.strip()
+    time_text = time_text.strip()
+
+    date_match = re.fullmatch(r"(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", date_text)
+    if date_match:
+        year, month, day = map(int, date_match.groups())
+    else:
+        date_match = re.fullmatch(r"(\d{1,2})[-/.](\d{1,2})", date_text)
+        if date_match:
+            year = now.year
+            month, day = map(int, date_match.groups())
+        else:
+            date_match = re.fullmatch(r"(\d{1,2})월(\d{1,2})일?", date_text)
+            if date_match is None:
+                raise ValueError("예약 날짜는 2026-09-10, 9-10, 9월10일 형식으로 입력해주세요.")
+
+            year = now.year
+            month, day = map(int, date_match.groups())
+
+    time_match = re.fullmatch(r"(\d{1,2}):(\d{1,2})", time_text)
+    if time_match:
+        hour, minute = map(int, time_match.groups())
+    else:
+        time_match = re.fullmatch(r"(\d{1,2})시(?:(\d{1,2})분?)?", time_text)
+        if time_match is None:
+            raise ValueError("예약 시간은 21:00 또는 21시 형식으로 입력해주세요.")
+
+        hour = int(time_match.group(1))
+        minute = int(time_match.group(2) or 0)
+
+    return datetime(year, month, day, hour, minute)
+
+
+async def handle_score_command(ctx, member_key, points, reason, expected_score_type=None):
+    if ctx.channel.id != SCORE_COMMAND_CHANNEL_ID:
+        await ctx.send("상/벌점 명령어는 지정된 채널에서만 사용할 수 있습니다.")
+        return
+
+    if not can_send_dm(ctx.author):
+        await ctx.send("상/벌점 부여 권한이 없습니다.")
+        return
+
+    if points == 0:
+        await ctx.send("점수는 + 또는 - 값으로 입력해주세요.")
+        return
+
+    if expected_score_type == "상점" and points < 0:
+        await ctx.send("상점은 + 점수로 입력해주세요. 예: !상점 맹덕 2주차 베스트 워크북 +2점")
+        return
+
+    if expected_score_type == "벌점" and points > 0:
+        await ctx.send("벌점은 - 점수로 입력해주세요. 예: !벌점 맹덕 5주차 미션 미제출 -4점")
+        return
+
+    matched_members = await asyncio.to_thread(find_member, member_key)
+
+    if not matched_members:
+        await ctx.send("스프레드시트에서 대상 멤버를 찾을 수 없습니다. 먼저 !sync-members를 실행해주세요.")
+        return
+
+    if len(matched_members) > 1:
+        names = ", ".join(member["display_name"] for member in matched_members)
+        await ctx.send(f"동명이인이 있습니다. 사용자 ID로 다시 입력해주세요: {names}")
+        return
+
+    member = matched_members[0]
+    _new_score = await asyncio.to_thread(
+        add_score,
+        member,
+        points,
+        reason,
+        str(ctx.author),
+    )
+
+    score_type = "상점" if points > 0 else "벌점"
+    dm_content = build_score_dm_content(member["display_name"], points, reason)
+    _success, response = await send_direct_message(bot, int(member["user_id"]), dm_content)
+    await ctx.send(f"{member['display_name']} 님에게 {score_type} {points:+d}점을 반영했습니다. {response}")
+
+
+async def register_scheduled_notice(ctx, send_at, message_content):
+    if not can_send_dm(ctx.author):
+        await ctx.send("예약 공지 등록 권한이 없습니다.")
+        return
+
+    if send_at <= datetime.now():
+        await ctx.send("현재보다 이후 시간으로 예약해주세요.")
+        return
+
+    scheduled_notice_id = await asyncio.to_thread(
+        add_scheduled_notice,
+        send_at,
+        message_content,
+        str(ctx.author),
+    )
+    schedule_notice_task(scheduled_notice_id, send_at, message_content)
+    await ctx.send(f"예약 공지 #{scheduled_notice_id} 등록 완료: {send_at:%Y-%m-%d %H:%M}")
+
+
 @bot.command(name='sync-members')
 async def sync_members_command(ctx):
     if ctx.channel.id != SCORE_COMMAND_CHANNEL_ID:
@@ -189,75 +327,54 @@ async def sync_members_command(ctx):
 
 @bot.command(name='score')
 async def score(ctx, member_key: str, points: int, *, reason):
-    if ctx.channel.id != SCORE_COMMAND_CHANNEL_ID:
-        await ctx.send("상/벌점 명령어는 지정된 채널에서만 사용할 수 있습니다.")
+    await handle_score_command(ctx, member_key, points, reason)
+
+
+@bot.command(name='상점')
+async def bonus_score(ctx, member_key: str, *, reason_and_points):
+    try:
+        reason, points = parse_reason_and_points(reason_and_points)
+    except ValueError as error:
+        await ctx.send(str(error))
         return
 
-    if not can_send_dm(ctx.author):
-        await ctx.send("상/벌점 부여 권한이 없습니다.")
+    await handle_score_command(ctx, member_key, points, reason, "상점")
+
+
+@bot.command(name='벌점')
+async def penalty_score(ctx, member_key: str, *, reason_and_points):
+    try:
+        reason, points = parse_reason_and_points(reason_and_points)
+    except ValueError as error:
+        await ctx.send(str(error))
         return
 
-    if points == 0:
-        await ctx.send("점수는 + 또는 - 값으로 입력해주세요.")
-        return
-
-    matched_members = await asyncio.to_thread(find_member, member_key)
-
-    if not matched_members:
-        await ctx.send("스프레드시트에서 대상 멤버를 찾을 수 없습니다. 먼저 !sync-members를 실행해주세요.")
-        return
-
-    if len(matched_members) > 1:
-        names = ", ".join(member["display_name"] for member in matched_members)
-        await ctx.send(f"동명이인이 있습니다. 사용자 ID로 다시 입력해주세요: {names}")
-        return
-
-    member = matched_members[0]
-    new_score = await asyncio.to_thread(
-        add_score,
-        member,
-        points,
-        reason,
-        str(ctx.author),
-    )
-
-    score_type = "상점" if points > 0 else "벌점"
-    dm_content = (
-        f"{score_type} {points:+d}점이 부여되었습니다.\n"
-        f"사유: {reason}\n"
-        f"현재 점수: {new_score:+d}점"
-    )
-    _success, response = await send_direct_message(bot, int(member["user_id"]), dm_content)
-    await ctx.send(f"{member['display_name']} 님에게 {score_type} {points:+d}점을 반영했습니다. {response}")
+    await handle_score_command(ctx, member_key, points, reason, "벌점")
 
 
 @bot.command(name='notice-schd')
 async def notice_schd(ctx, year: int, month: int, day: int, hour: int, minute: int, *, message_content):
-    if not can_send_dm(ctx.author):
-        await ctx.send("예약 공지 등록 권한이 없습니다.")
-        return
-
     try:
         send_at = datetime(year, month, day, hour, minute)
     except ValueError:
         await ctx.send("예약 날짜/시간 형식이 올바르지 않습니다.")
         return
 
-    if send_at <= datetime.now():
-        await ctx.send("현재보다 이후 시간으로 예약해주세요.")
+    await register_scheduled_notice(ctx, send_at, message_content)
+
+
+@bot.command(name='공지-예약')
+async def korean_notice_schd(ctx, date_text: str, time_text: str, *, message_content):
+    try:
+        send_at = parse_scheduled_notice_command_time(date_text, time_text)
+    except ValueError as error:
+        await ctx.send(str(error))
         return
 
-    scheduled_notice_id = await asyncio.to_thread(
-        add_scheduled_notice,
-        send_at,
-        message_content,
-        str(ctx.author),
-    )
-    schedule_notice_task(scheduled_notice_id, send_at, message_content)
-    await ctx.send(f"예약 공지 #{scheduled_notice_id} 등록 완료: {send_at:%Y-%m-%d %H:%M}")
+    await register_scheduled_notice(ctx, send_at, message_content)
 
 
-@bot.command(name='notice')
+@bot.command(name='notice', aliases=['공지'])
 async def notice(ctx, message_id: typing.Optional[int], *, message_content):
     challenger_notice_channel = bot.get_channel(CHALLENGER_NOTICE_CHANNEL_ID)
 
