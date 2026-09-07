@@ -152,40 +152,183 @@ def can_send_dm(member):
     return any(role.id in STAFF_ROLE_IDS for role in member.roles)
 
 
-def build_score_dm_content(display_name, points, reason):
+def build_score_dm_content(display_name, points, reason, dm_reason=None):
+    display_reason = dm_reason or reason
+
     if points > 0:
         return (
             f"안녕하세요 `{display_name}`, UMC 운영진입니다.\n"
-            f"{reason}에 선정되어, 상점 {points}점을 부여합니다.\n"
+            f"{display_reason} 상점 {points}점을 부여합니다.\n"
             "감사합니다."
         )
 
     return (
         f"안녕하세요 `{display_name}`, UMC 운영진입니다.\n"
-        f"`{reason}`로 인한 감점 `{points}점`을 안내드립니다.\n"
+        f"`{display_reason}`로 인한 감점 `{points}점`을 안내드립니다.\n"
         "감사합니다."
     )
 
 
-def parse_score_text(score_text):
-    match = re.fullmatch(r"([+-]?\d+)점?", score_text.strip())
-    if match is None:
-        raise ValueError("점수는 +2점 또는 -4점처럼 입력해주세요.")
+SCORE_RULES = {
+    "벌점-공지미체크": {
+        "points": -2,
+        "parameter": "notice_message_id",
+        "usage_param": "메시지ID",
+    },
+    "벌점-과제미수행": {
+        "points": -4,
+        "parameter": "week",
+        "reason_template": "{week} 과제 미수행",
+        "usage_param": "n주차",
+    },
+    "벌점-스터디지각": {
+        "points": -2,
+        "parameter": "week",
+        "reason_template": "{week} 스터디 지각",
+        "usage_param": "n주차",
+    },
+    "벌점-스터디불참": {
+        "points": -4,
+        "parameter": "week",
+        "reason_template": "{week} 스터디 불참",
+        "usage_param": "n주차",
+    },
+    "벌점-행사지각": {
+        "points": -2,
+        "parameter": "event_name",
+        "reason_template": "{event_name} 행사 지각",
+        "usage_param": "행사명",
+    },
+    "벌점-중도퇴실": {
+        "points": -2,
+        "parameter": "event_name",
+        "reason_template": "{event_name} 행사 중도 퇴실",
+        "usage_param": "행사명",
+    },
+    "벌점-기간외취소": {
+        "points": -4,
+        "parameter": "event_name",
+        "reason_template": "{event_name} 행사 기간 외 취소",
+        "usage_param": "행사명",
+    },
+    "벌점-노쇼": {
+        "points": -10,
+        "parameter": "event_name",
+        "reason_template": "{event_name} 노쇼 (결석)",
+        "usage_param": "행사명",
+    },
+    "상점-블로그": {
+        "points": 3,
+        "parameter": "week",
+        "reason_template": "{week} 블로그 챌린지",
+        "dm_reason_template": "{week} 블로그 챌린지 참여로",
+        "usage_param": "n주차",
+    },
+    "상점-베스트워크북": {
+        "points": 2,
+        "parameter": "week",
+        "reason_template": "{week} 베스트 워크북 선정",
+        "dm_reason_template": "{week} 베스트 워크북에 선정되어,",
+        "usage_param": "n주차",
+    },
+    "상점-행사리뷰어": {
+        "points": 1,
+        "reason": "행사 리뷰어",
+        "dm_reason": "행사 리뷰어 참여로",
+    },
+    "상점-중앙행사": {
+        "points": 2,
+        "reason": "중앙 행사 참여",
+        "dm_reason": "중앙 행사 참여로",
+    },
+    "상점-지식인": {
+        "points": 1,
+        "reason": "지식인 채널 활동",
+        "dm_reason": "지식인 채널 활동으로",
+    },
+}
 
-    points = int(match.group(1))
-    if points == 0:
-        raise ValueError("점수는 + 또는 - 값으로 입력해주세요.")
 
-    return points
+def get_score_command_usage():
+    usages = []
+    for command, rule in SCORE_RULES.items():
+        usage = f"!{command} 맹덕/이용재"
+        if rule.get("usage_param"):
+            usage += f" {rule['usage_param']}"
+        usages.append(usage)
+
+    return "\n".join(usages)
 
 
-def parse_reason_and_points(reason_and_points):
-    parts = reason_and_points.rsplit(maxsplit=1)
-    if len(parts) != 2:
-        raise ValueError("사유와 점수를 함께 입력해주세요. 예: !상점 맹덕 2주차 베스트 워크북 +2점")
+def format_rule_usage(command_name, rule):
+    usage = f"!{command_name} 맹덕/이용재"
+    if rule.get("usage_param"):
+        usage += f" {rule['usage_param']}"
 
-    reason, score_text = parts
-    return reason, parse_score_text(score_text)
+    return usage
+
+
+def parse_week(extra):
+    week = extra.strip()
+    if re.fullmatch(r"\d+주차", week) is None:
+        raise ValueError("주차는 5주차처럼 입력해주세요.")
+
+    return week
+
+
+async def get_notice_first_line(message_id):
+    challenger_notice_channel = bot.get_channel(CHALLENGER_NOTICE_CHANNEL_ID)
+    if challenger_notice_channel is None:
+        raise RuntimeError("챌린저_공지 채널을 찾을 수 없습니다.")
+
+    try:
+        notice_message = await challenger_notice_channel.fetch_message(message_id)
+    except discord.NotFound:
+        raise ValueError(f"메시지 {message_id}를 찾을 수 없습니다.")
+    except discord.HTTPException as error:
+        raise ValueError(f"메시지 {message_id} 조회 중 오류가 발생했습니다: {error}")
+
+    first_line = get_first_line(notice_message.content).strip()
+    if not first_line:
+        raise ValueError(f"메시지 {message_id}의 첫 행이 비어 있습니다.")
+
+    return first_line
+
+
+async def build_score_context(ctx, rule, extra):
+    parameter = rule.get("parameter")
+    extra = extra.strip()
+
+    if parameter is None:
+        if extra:
+            raise ValueError(f"`!{ctx.invoked_with}` 명령어는 대상자만 입력해주세요.")
+
+        return rule["reason"], rule.get("dm_reason")
+
+    if not extra:
+        raise ValueError("필수 파라미터가 빠졌습니다.")
+
+    if parameter == "week":
+        week = parse_week(extra)
+        reason = rule["reason_template"].format(week=week)
+        dm_reason_template = rule.get("dm_reason_template", rule["reason_template"])
+        return reason, dm_reason_template.format(week=week)
+
+    if parameter == "notice_message_id":
+        if re.fullmatch(r"\d+", extra) is None:
+            raise ValueError("공지 미체크 메시지 ID는 숫자로 입력해주세요.")
+
+        message_id = int(extra)
+        notice_first_line = await get_notice_first_line(message_id)
+        reason = f"공지 미체크: {notice_first_line} ({message_id})"
+        dm_reason = f"{notice_first_line} 공지 미체크"
+        return reason, dm_reason
+
+    if parameter == "event_name":
+        reason = rule["reason_template"].format(event_name=extra)
+        return reason, reason
+
+    raise RuntimeError(f"지원하지 않는 점수 명령어 파라미터입니다: {parameter}")
 
 
 def parse_scheduled_notice_command_time(date_text, time_text):
@@ -223,7 +366,7 @@ def parse_scheduled_notice_command_time(date_text, time_text):
     return datetime(year, month, day, hour, minute)
 
 
-async def handle_score_command(ctx, member_key, points, reason, expected_score_type=None):
+async def handle_score_command(ctx, member_key, points, reason, expected_score_type=None, dm_reason=None):
     if ctx.channel.id != SCORE_COMMAND_CHANNEL_ID:
         await ctx.send("상/벌점 명령어는 지정된 채널에서만 사용할 수 있습니다.")
         return
@@ -265,9 +408,28 @@ async def handle_score_command(ctx, member_key, points, reason, expected_score_t
     )
 
     score_type = "상점" if points > 0 else "벌점"
-    dm_content = build_score_dm_content(member["display_name"], points, reason)
+    dm_content = build_score_dm_content(member["display_name"], points, reason, dm_reason)
     _success, response = await send_direct_message(bot, int(member["user_id"]), dm_content)
     await ctx.send(f"{member['display_name']} 님에게 {score_type} {points:+d}점을 반영했습니다. {response}")
+
+
+async def handle_fixed_score_command(ctx, member_key: str, *, extra=""):
+    rule = SCORE_RULES[ctx.command.name]
+
+    try:
+        reason, dm_reason = await build_score_context(ctx, rule, extra)
+    except ValueError as error:
+        await ctx.send(f"{error} 예: {format_rule_usage(ctx.invoked_with, rule)}")
+        return
+    except RuntimeError as error:
+        await ctx.send(str(error))
+        return
+
+    await handle_score_command(ctx, member_key, rule["points"], reason, dm_reason=dm_reason)
+
+
+for score_command_name in SCORE_RULES:
+    bot.command(name=score_command_name)(handle_fixed_score_command)
 
 
 async def register_scheduled_notice(ctx, send_at, message_content):
@@ -326,30 +488,18 @@ async def sync_members_command(ctx):
 
 
 @bot.command(name='score')
-async def score(ctx, member_key: str, points: int, *, reason):
-    await handle_score_command(ctx, member_key, points, reason)
+async def score(ctx, *args):
+    await ctx.send("점수는 항목별 명령어로만 부여할 수 있습니다.\n" + get_score_command_usage())
 
 
 @bot.command(name='상점')
-async def bonus_score(ctx, member_key: str, *, reason_and_points):
-    try:
-        reason, points = parse_reason_and_points(reason_and_points)
-    except ValueError as error:
-        await ctx.send(str(error))
-        return
-
-    await handle_score_command(ctx, member_key, points, reason, "상점")
+async def bonus_score(ctx, *args):
+    await ctx.send("상점은 항목별 명령어로만 부여할 수 있습니다.\n" + get_score_command_usage())
 
 
 @bot.command(name='벌점')
-async def penalty_score(ctx, member_key: str, *, reason_and_points):
-    try:
-        reason, points = parse_reason_and_points(reason_and_points)
-    except ValueError as error:
-        await ctx.send(str(error))
-        return
-
-    await handle_score_command(ctx, member_key, points, reason, "벌점")
+async def penalty_score(ctx, *args):
+    await ctx.send("벌점은 항목별 명령어로만 부여할 수 있습니다.\n" + get_score_command_usage())
 
 
 @bot.command(name='notice-schd')
