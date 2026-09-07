@@ -44,7 +44,7 @@ intents.message_content = True
 intents.reactions = True
 intents.members = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 scheduled_notice_tasks = {}
 
 DISCORD_BOT_TOKEN = get_required_env("DISCORD_BOT_TOKEN")
@@ -154,19 +154,21 @@ def can_send_dm(member):
     return any(role.id in STAFF_ROLE_IDS for role in member.roles)
 
 
-def build_score_dm_content(display_name, points, reason, dm_reason=None):
+def build_score_dm_content(display_name, points, reason, current_score, dm_reason=None):
     display_reason = dm_reason or reason
 
     if points > 0:
         return (
             f"안녕하세요 `{display_name}`, UMC 운영진입니다.\n"
             f"{display_reason} 상점 {points}점을 부여합니다.\n"
+            f"현재 점수 : {current_score:+d}점\n"
             "감사합니다."
         )
 
     return (
         f"안녕하세요 `{display_name}`, UMC 운영진입니다.\n"
         f"`{display_reason}`로 인한 감점 `{points}점`을 안내드립니다.\n"
+        f"현재 점수 : {current_score:+d}점\n"
         "감사합니다."
     )
 
@@ -249,6 +251,59 @@ SCORE_RULES = {
         "dm_reason": "지식인 채널 활동으로",
     },
 }
+
+PENALTY_HELP_ITEMS = [
+    ("!벌점-공지미체크 맹덕/이용재 메시지ID", "벌점 2점을 자동 부여합니다. 해당 공지의 첫 행을 가져와 공지 미체크로 기록합니다."),
+    ("!벌점-과제미수행 맹덕/이용재 n주차", "벌점 4점을 자동 부여합니다. 예: !벌점-과제미수행 맹덕/이용재 5주차"),
+    ("!벌점-스터디지각 맹덕/이용재 n주차", "벌점 2점을 자동 부여합니다. 예: !벌점-스터디지각 맹덕/이용재 5주차"),
+    ("!벌점-스터디불참 맹덕/이용재 n주차", "벌점 4점을 자동 부여합니다. 예: !벌점-스터디불참 맹덕/이용재 5주차"),
+    ("!벌점-행사지각 맹덕/이용재 행사명", "벌점 2점을 자동 부여합니다. 행사명을 DM과 기록에 포함합니다."),
+    ("!벌점-중도퇴실 맹덕/이용재 행사명", "벌점 2점을 자동 부여합니다. 행사명을 DM과 기록에 포함합니다."),
+    ("!벌점-기간외취소 맹덕/이용재 행사명", "벌점 4점을 자동 부여합니다. 행사명을 DM과 기록에 포함합니다."),
+    ("!벌점-노쇼 맹덕/이용재 행사명", "벌점 10점을 자동 부여합니다. 행사명을 DM과 기록에 포함합니다."),
+]
+
+BONUS_HELP_ITEMS = [
+    ("!상점-블로그 맹덕/이용재 n주차", "상점 3점을 자동 부여합니다. 예: !상점-블로그 맹덕/이용재 5주차"),
+    ("!상점-베스트워크북 맹덕/이용재 n주차", "상점 2점을 자동 부여합니다. 예: !상점-베스트워크북 맹덕/이용재 5주차"),
+    ("!상점-행사리뷰어 맹덕/이용재", "상점 1점을 자동 부여합니다. 행사 후기 구글폼 제출 확인 시 사용합니다."),
+    ("!상점-중앙행사 맹덕/이용재", "상점 2점을 자동 부여합니다. 중앙 행사 누적 2회 참여 시 사용합니다."),
+    ("!상점-지식인 맹덕/이용재", "상점 1점을 자동 부여합니다. 지식인 채널 질문 또는 답변 작성 시 사용합니다."),
+]
+
+NOTICE_HELP_ITEMS = [
+    ("!공지 공지글", "챌린저_공지 채널에 공지를 발송하고 확인 이모지를 추가합니다."),
+    ("!공지-예약 2026-09-10 21:00 공지글", "지정한 시간에 공지를 예약 발송합니다."),
+    ("!공지 메시지ID 수정할공지글", "기존 공지 메시지를 수정합니다."),
+    ("!check 메시지ID", "해당 공지의 확인 이모지 미응답자를 수동 확인합니다."),
+]
+
+GENERAL_HELP_ITEMS = [
+    ("!help", "전체 명령어 도움말을 보여줍니다."),
+    ("!help-벌점", "벌점 명령어 도움말을 보여줍니다."),
+    ("!help-상점", "상점 명령어 도움말을 보여줍니다."),
+    ("!help-공지", "공지 명령어 도움말을 보여줍니다."),
+    ("!점수초기화 맹덕/이용재", "대상자의 누적 점수를 0점으로 초기화하고 기록을 남깁니다."),
+    ("!sync-members", "대상 역할 멤버를 스프레드시트에 동기화합니다."),
+]
+
+
+def build_help_section(title, items):
+    lines = [f"## {title}"]
+    for item in items:
+        command, description = item
+        lines.append(f"`{command}` - {description}")
+
+    return "\n".join(lines)
+
+
+def build_all_help_content():
+    return "\n\n".join([
+        build_help_section("기본", GENERAL_HELP_ITEMS),
+        build_help_section("벌점", PENALTY_HELP_ITEMS),
+        build_help_section("상점", BONUS_HELP_ITEMS),
+        build_help_section("공지", NOTICE_HELP_ITEMS),
+    ])
 
 
 def get_score_command_usage():
@@ -393,7 +448,7 @@ async def handle_score_command(ctx, member_key, points, reason, expected_score_t
     if member is None:
         return
 
-    _new_score, score_row_index = await asyncio.to_thread(
+    new_score, score_row_index = await asyncio.to_thread(
         add_score,
         member,
         points,
@@ -402,7 +457,7 @@ async def handle_score_command(ctx, member_key, points, reason, expected_score_t
     )
 
     score_type = "상점" if points > 0 else "벌점"
-    dm_content = build_score_dm_content(member["display_name"], points, reason, dm_reason)
+    dm_content = build_score_dm_content(member["display_name"], points, reason, new_score, dm_reason)
     success, response = await send_direct_message(bot, int(member["user_id"]), dm_content)
     await asyncio.to_thread(update_score_dm_result, score_row_index, success, response)
     await ctx.send(f"{member['display_name']} 님에게 {score_type} {points:+d}점을 반영했습니다. {response}")
@@ -495,6 +550,26 @@ async def sync_members_command(ctx):
 
     saved_count = await asyncio.to_thread(sync_members, list(target_members_by_id.values()))
     await ctx.send(f"대상 역할 멤버 {saved_count}명을 스프레드시트에 저장했습니다.")
+
+
+@bot.command(name='help')
+async def help_command(ctx):
+    await ctx.send(build_all_help_content())
+
+
+@bot.command(name='help-벌점')
+async def help_penalty_command(ctx):
+    await ctx.send(build_help_section("벌점", PENALTY_HELP_ITEMS))
+
+
+@bot.command(name='help-상점')
+async def help_bonus_command(ctx):
+    await ctx.send(build_help_section("상점", BONUS_HELP_ITEMS))
+
+
+@bot.command(name='help-공지')
+async def help_notice_command(ctx):
+    await ctx.send(build_help_section("공지", NOTICE_HELP_ITEMS))
 
 
 @bot.command(name='score')
