@@ -13,7 +13,9 @@ from spreadsheet_store import (
     add_score,
     find_member,
     get_pending_scheduled_notices,
+    mark_pending_score_dm_results_unknown,
     parse_scheduled_notice_time,
+    reset_all_scores,
     reset_score,
     sync_members,
     update_score_dm_result,
@@ -46,6 +48,7 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 scheduled_notice_tasks = {}
+notice_reaction_check_tasks = {}
 
 DISCORD_BOT_TOKEN = get_required_env("DISCORD_BOT_TOKEN")
 
@@ -58,6 +61,8 @@ SCORE_COMMAND_CHANNEL_ID = get_required_int_env("SCORE_COMMAND_CHANNEL_ID")
 # 역할 ID
 TARGET_ROLE_IDS = get_required_int_list_env("TARGET_ROLE_IDS")
 STAFF_ROLE_IDS = get_required_int_list_env("STAFF_ROLE_IDS")
+NOTICE_CONFIRM_EMOJI_ID = 1019827185676197918
+NOTICE_CONFIRM_EMOJI_TEXT = "<:gachon:1019827185676197918>"
 
 @bot.event
 async def on_ready():
@@ -91,6 +96,16 @@ def schedule_notice_task(scheduled_notice_id, send_at, message_content):
     )
 
 
+def schedule_notice_reaction_check_task(guild, message_id):
+    existing_task = notice_reaction_check_tasks.get(message_id)
+    if existing_task is not None and not existing_task.done():
+        return
+
+    notice_reaction_check_tasks[message_id] = asyncio.create_task(
+        run_notice_reaction_check(guild, message_id)
+    )
+
+
 async def run_scheduled_notice(scheduled_notice_id, send_at, message_content):
     try:
         delay = max((send_at - datetime.now()).total_seconds(), 0)
@@ -100,6 +115,17 @@ async def run_scheduled_notice(scheduled_notice_id, send_at, message_content):
         await send_scheduled_notice(scheduled_notice_id, message_content)
     finally:
         scheduled_notice_tasks.pop(scheduled_notice_id, None)
+
+
+async def run_notice_reaction_check(guild, message_id):
+    try:
+        await asyncio.sleep(86400)
+        try:
+            await send_notice_reaction_report(guild, message_id)
+        except Exception as error:
+            print(f"공지 메시지 {message_id} 리액션 확인 중 오류가 발생했습니다: {error}")
+    finally:
+        notice_reaction_check_tasks.pop(message_id, None)
 
 
 async def send_scheduled_notice(scheduled_notice_id, message_content):
@@ -117,7 +143,7 @@ async def send_scheduled_notice(scheduled_notice_id, message_content):
         bot_notice_channel = bot.get_channel(BOT_NOTICE_CHANNEL_ID)
 
         notice_message = await challenger_notice_channel.send(message_content)
-        await notice_message.add_reaction("<:gachon:1019827185676197918>")
+        await notice_message.add_reaction(NOTICE_CONFIRM_EMOJI_TEXT)
         await asyncio.to_thread(
             update_scheduled_notice_status_by_id,
             scheduled_notice_id,
@@ -132,6 +158,7 @@ async def send_scheduled_notice(scheduled_notice_id, message_content):
                 f"메시지 ID: {notice_message.id}\n"
                 f"> {first_line}"
             )
+        schedule_notice_reaction_check_task(challenger_notice_channel.guild, notice_message.id)
     except Exception as error:
         await asyncio.to_thread(
             update_scheduled_notice_status_by_id,
@@ -147,6 +174,71 @@ def get_first_line(message_content):
     return lines[0] if lines else ""
 
 
+async def fetch_challenger_notice_message(message_id):
+    challenger_notice_channel = bot.get_channel(CHALLENGER_NOTICE_CHANNEL_ID)
+    if challenger_notice_channel is None:
+        raise RuntimeError("챌린저_공지 채널을 찾을 수 없습니다.")
+
+    return await challenger_notice_channel.fetch_message(message_id)
+
+
+async def get_notice_reacted_user_ids(notice_message):
+    for reaction in notice_message.reactions:
+        if getattr(reaction.emoji, "id", None) != NOTICE_CONFIRM_EMOJI_ID:
+            continue
+
+        return {
+            user.id
+            async for user in reaction.users()
+            if not user.bot
+        }
+
+    return set()
+
+
+def get_target_notice_members(guild):
+    target_members_by_id = {}
+
+    for role_id in TARGET_ROLE_IDS:
+        target_role = guild.get_role(role_id)
+        if target_role is None:
+            continue
+
+        for member in target_role.members:
+            if member.bot:
+                continue
+
+            target_members_by_id[member.id] = member
+
+    return list(target_members_by_id.values())
+
+
+def is_staff_member(member):
+    return any(role.id in STAFF_ROLE_IDS for role in member.roles)
+
+
+async def send_notice_reaction_report(guild, message_id):
+    notice_message = await fetch_challenger_notice_message(message_id)
+    reacted_user_ids = await get_notice_reacted_user_ids(notice_message)
+    non_reactors = [
+        member
+        for member in get_target_notice_members(guild)
+        if member.id not in reacted_user_ids and not is_staff_member(member)
+    ]
+
+    first_line = get_first_line(notice_message.content)
+    non_reactors_list = "\n".join(member.display_name for member in non_reactors).replace("\n", "\n> ")
+    statistics_channel = bot.get_channel(NOTICE_STATISTICS_CHANNEL_ID)
+
+    if statistics_channel is None:
+        raise RuntimeError("공지 통계 채널을 찾을 수 없습니다.")
+
+    if non_reactors:
+        await statistics_channel.send(f"🔴 {first_line}\n## 미응답자 목록\n> {non_reactors_list}")
+    else:
+        await statistics_channel.send(f"🔵 {first_line}\n> 모든 특정 역할의 사용자가 이모지를 달았습니다.")
+
+
 def can_send_dm(member):
     if member.guild_permissions.administrator:
         return True
@@ -154,21 +246,29 @@ def can_send_dm(member):
     return any(role.id in STAFF_ROLE_IDS for role in member.roles)
 
 
-def build_score_dm_content(display_name, points, reason, current_score, dm_reason=None):
+def build_score_dm_content(display_name, points, reason, dm_reason=None, custom_reason=False):
     display_reason = dm_reason or reason
 
     if points > 0:
+        reason_text = (
+            f"{display_reason}(으)로 인해, 상점 {points}점을 부여합니다."
+            if custom_reason
+            else f"{display_reason} 상점 {points}점을 부여합니다."
+        )
         return (
             f"안녕하세요 `{display_name}`, UMC 운영진입니다.\n"
-            f"{display_reason} 상점 {points}점을 부여합니다.\n"
-            f"현재 점수 : {current_score:+d}점\n"
+            f"{reason_text}\n"
             "감사합니다."
         )
 
+    reason_text = (
+        f"`{display_reason}`(으)로 인해, 감점 `{points}점`을 안내드립니다."
+        if custom_reason
+        else f"`{display_reason}`로 인한 감점 `{points}점`을 안내드립니다."
+    )
     return (
         f"안녕하세요 `{display_name}`, UMC 운영진입니다.\n"
-        f"`{display_reason}`로 인한 감점 `{points}점`을 안내드립니다.\n"
-        f"현재 점수 : {current_score:+d}점\n"
+        f"{reason_text}\n"
         "감사합니다."
     )
 
@@ -253,6 +353,7 @@ SCORE_RULES = {
 }
 
 PENALTY_HELP_ITEMS = [
+    ("!벌점 맹덕/이용재 -2 사유", "커스텀 벌점을 부여합니다."),
     ("!벌점-공지미체크 맹덕/이용재 메시지ID", "벌점 2점을 자동 부여합니다. 해당 공지의 첫 행을 가져와 공지 미체크로 기록합니다."),
     ("!벌점-과제미수행 맹덕/이용재 n주차", "벌점 4점을 자동 부여합니다. 예: !벌점-과제미수행 맹덕/이용재 5주차"),
     ("!벌점-스터디지각 맹덕/이용재 n주차", "벌점 2점을 자동 부여합니다. 예: !벌점-스터디지각 맹덕/이용재 5주차"),
@@ -264,6 +365,7 @@ PENALTY_HELP_ITEMS = [
 ]
 
 BONUS_HELP_ITEMS = [
+    ("!상점 맹덕/이용재 +2 사유", "커스텀 상점을 부여합니다."),
     ("!상점-블로그 맹덕/이용재 n주차", "상점 3점을 자동 부여합니다. 예: !상점-블로그 맹덕/이용재 5주차"),
     ("!상점-베스트워크북 맹덕/이용재 n주차", "상점 2점을 자동 부여합니다. 예: !상점-베스트워크북 맹덕/이용재 5주차"),
     ("!상점-행사리뷰어 맹덕/이용재", "상점 1점을 자동 부여합니다. 행사 후기 구글폼 제출 확인 시 사용합니다."),
@@ -284,6 +386,7 @@ GENERAL_HELP_ITEMS = [
     ("!help-상점", "상점 명령어 도움말을 보여줍니다."),
     ("!help-공지", "공지 명령어 도움말을 보여줍니다."),
     ("!점수초기화 맹덕/이용재", "대상자의 누적 점수를 0점으로 초기화하고 기록을 남깁니다."),
+    ("!점수초기화-all", "모든 멤버의 누적 점수를 0점으로 초기화하고 기록을 남깁니다."),
     ("!sync-members", "대상 역할 멤버를 스프레드시트에 동기화합니다."),
 ]
 
@@ -331,6 +434,18 @@ def parse_week(extra):
         raise ValueError("주차는 5주차처럼 입력해주세요.")
 
     return week
+
+
+def parse_custom_score(score_text):
+    match = re.fullmatch(r"([+-]?\d+)점?", score_text.strip())
+    if match is None:
+        raise ValueError("점수는 +2 또는 -2처럼 입력해주세요.")
+
+    points = int(match.group(1))
+    if points == 0:
+        raise ValueError("점수는 0점이 아닌 값으로 입력해주세요.")
+
+    return points
 
 
 async def get_notice_first_line(message_id):
@@ -423,7 +538,7 @@ def parse_scheduled_notice_command_time(date_text, time_text):
     return datetime(year, month, day, hour, minute)
 
 
-async def handle_score_command(ctx, member_key, points, reason, expected_score_type=None, dm_reason=None):
+async def handle_score_command(ctx, member_key, points, reason, expected_score_type=None, dm_reason=None, custom_reason=False):
     if ctx.channel.id != SCORE_COMMAND_CHANNEL_ID:
         await ctx.send("상/벌점 명령어는 지정된 채널에서만 사용할 수 있습니다.")
         return
@@ -457,10 +572,21 @@ async def handle_score_command(ctx, member_key, points, reason, expected_score_t
     )
 
     score_type = "상점" if points > 0 else "벌점"
-    dm_content = build_score_dm_content(member["display_name"], points, reason, new_score, dm_reason)
+    dm_content = build_score_dm_content(
+        member["display_name"],
+        points,
+        reason,
+        dm_reason,
+        custom_reason,
+    )
     success, response = await send_direct_message(bot, int(member["user_id"]), dm_content)
-    await asyncio.to_thread(update_score_dm_result, score_row_index, success, response)
-    await ctx.send(f"{member['display_name']} 님에게 {score_type} {points:+d}점을 반영했습니다. {response}")
+    try:
+        await asyncio.to_thread(update_score_dm_result, score_row_index, success, response)
+        dm_record_response = ""
+    except Exception as error:
+        dm_record_response = f" DM 결과 기록 업데이트는 실패했습니다: {error}"
+
+    await ctx.send(f"{member['display_name']} 님에게 {score_type} {points:+d}점을 반영했습니다. {response}{dm_record_response}")
 
 
 async def find_one_member_for_score(ctx, member_key):
@@ -574,17 +700,50 @@ async def help_notice_command(ctx):
 
 @bot.command(name='score')
 async def score(ctx, *args):
-    await ctx.send("점수는 항목별 명령어로만 부여할 수 있습니다.\n" + get_score_command_usage())
+    await ctx.send(
+        "점수는 한글 명령어로 부여해주세요.\n"
+        "`!상점 맹덕/이용재 +2 사유`\n"
+        "`!벌점 맹덕/이용재 -2 사유`\n\n"
+        + get_score_command_usage()
+    )
 
 
 @bot.command(name='상점')
-async def bonus_score(ctx, *args):
-    await ctx.send("상점은 항목별 명령어로만 부여할 수 있습니다.\n" + get_score_command_usage())
+async def bonus_score(ctx, member_key: str = None, score_text: str = None, *, reason=""):
+    if member_key is None or score_text is None or not reason.strip():
+        await ctx.send("커스텀 상점 형식: !상점 맹덕/이용재 +2 사유")
+        return
+
+    try:
+        points = parse_custom_score(score_text)
+    except ValueError as error:
+        await ctx.send(str(error))
+        return
+
+    if points < 0:
+        await ctx.send("상점은 + 점수로 입력해주세요. 예: !상점 맹덕/이용재 +2 사유")
+        return
+
+    await handle_score_command(ctx, member_key, points, reason.strip(), "상점", custom_reason=True)
 
 
 @bot.command(name='벌점')
-async def penalty_score(ctx, *args):
-    await ctx.send("벌점은 항목별 명령어로만 부여할 수 있습니다.\n" + get_score_command_usage())
+async def penalty_score(ctx, member_key: str = None, score_text: str = None, *, reason=""):
+    if member_key is None or score_text is None or not reason.strip():
+        await ctx.send("커스텀 벌점 형식: !벌점 맹덕/이용재 -2 사유")
+        return
+
+    try:
+        points = parse_custom_score(score_text)
+    except ValueError as error:
+        await ctx.send(str(error))
+        return
+
+    if points > 0:
+        await ctx.send("벌점은 - 점수로 입력해주세요. 예: !벌점 맹덕/이용재 -2 사유")
+        return
+
+    await handle_score_command(ctx, member_key, points, reason.strip(), "벌점", custom_reason=True)
 
 
 @bot.command(name='점수초기화')
@@ -608,8 +767,36 @@ async def reset_member_score(ctx, member_key: str, *, extra=""):
     previous_score = await asyncio.to_thread(reset_score, member, str(ctx.author))
     await ctx.send(
         f"{member['display_name']} 님의 점수를 초기화했습니다. "
-        f"이전 점수: {previous_score:+d}점, 현재 점수: +0점"
+        f"이전 점수: {previous_score:+d}점"
     )
+
+
+@bot.command(name='점수초기화-all')
+async def reset_all_member_scores(ctx):
+    if ctx.channel.id != SCORE_COMMAND_CHANNEL_ID:
+        await ctx.send("점수 초기화 명령어는 지정된 상/벌점 채널에서만 사용할 수 있습니다.")
+        return
+
+    if not can_send_dm(ctx.author):
+        await ctx.send("점수 초기화 권한이 없습니다.")
+        return
+
+    reset_count = await asyncio.to_thread(reset_all_scores, str(ctx.author))
+    await ctx.send(f"모든 멤버 {reset_count}명의 점수를 초기화했습니다.")
+
+
+@bot.command(name='dm상태복구')
+async def recover_dm_status(ctx):
+    if ctx.channel.id != SCORE_COMMAND_CHANNEL_ID:
+        await ctx.send("DM 상태 복구 명령어는 지정된 상/벌점 채널에서만 사용할 수 있습니다.")
+        return
+
+    if not can_send_dm(ctx.author):
+        await ctx.send("DM 상태 복구 권한이 없습니다.")
+        return
+
+    updated_count = await asyncio.to_thread(mark_pending_score_dm_results_unknown)
+    await ctx.send(f"pending DM 상태 {updated_count}건을 unknown으로 정리했습니다.")
 
 
 @bot.command(name='notice-schd')
@@ -648,8 +835,8 @@ async def notice(ctx, message_id: typing.Optional[int], *, message_content):
         await ctx.send(f"{message_content.splitlines()[0]} 공지의 메시지 ID: {notice_message.id}")
         
         # 커스텀 이모지 사용하도록 설정
-        emoji = "<:gachon:1019827185676197918>"
-        await notice_message.add_reaction(emoji)
+        await notice_message.add_reaction(NOTICE_CONFIRM_EMOJI_TEXT)
+        schedule_notice_reaction_check_task(ctx.guild, notice_message.id)
     else:
         # 기존 공지 수정 로직
         try:
@@ -659,102 +846,15 @@ async def notice(ctx, message_id: typing.Optional[int], *, message_content):
         except discord.NotFound:
             await ctx.send(f"메시지 {message_id}를 찾을 수 없습니다.")
 
-    # 공지 보낸 후 1일 뒤에 리액션 확인
-    await asyncio.sleep(86400)  # 1일 = 86400초
-
-    # 메시지 리액션 추가한 챌린저 확인
-    notice_message = await challenger_notice_channel.fetch_message(notice_message.id)
-    reaction = discord.utils.get(notice_message.reactions, emoji=discord.PartialEmoji(name="gachon", id=1019827185676197918))
-
-    if reaction is not None:
-        users_who_reacted = [user async for user in reaction.users() if not user.bot]
-    else:
-        users_who_reacted = []
-
-    # 특정 역할 필터링
-    non_reactors = []
-    for role_id in TARGET_ROLE_IDS:
-        target_role = ctx.guild.get_role(role_id)
-        if target_role is not None:
-            members_with_role = [member for member in ctx.guild.members if target_role in member.roles]
-            non_reactors.extend([member for member in members_with_role if member.id not in [user.id for user in users_who_reacted]])
-
-    # 운영진 필터링
-    final_non_reactors = []
-    for member in non_reactors:
-        has_staff_role = any(staff_role_id in [role.id for role in member.roles] for staff_role_id in STAFF_ROLE_IDS)
-        if not has_staff_role:
-            final_non_reactors.append(member)
-
-    # 메시지 첫 줄 추출
-    first_line = message_content.splitlines()[0]
-
-    # 미응답자 목록에서 줄바꿈 처리
-    non_reactors_list = "\n".join([member.display_name for member in final_non_reactors]).replace('\n', '\n> ')
-
-    # 통계 채널 변수 생성
-    statistics_channel = bot.get_channel(NOTICE_STATISTICS_CHANNEL_ID)
-    
-    # 미응답자 목록 출력
-    if final_non_reactors:
-        response = f"🔴 {first_line}\n## 미응답자 목록\n> {non_reactors_list}"
-        await statistics_channel.send(response)
-    else:
-        response = f"🔵 {first_line}\n> 모든 특정 역할의 사용자가 이모지를 달았습니다."
-        await statistics_channel.send(response)
-
 @bot.command(name='check')
 async def check(ctx, message_id: int):
     """수동으로 리액션 확인하는 명령어"""
-    challenger_notice_channel = bot.get_channel(CHALLENGER_NOTICE_CHANNEL_ID)
-    
     try:
-        notice_message = await challenger_notice_channel.fetch_message(message_id)
-        
-        users_who_reacted = []
-        for reaction in notice_message.reactions:
-            # 커스텀 이모지 확인 - ID로 정확하게 확인
-            if hasattr(reaction.emoji, 'id') and reaction.emoji.id == 1019827185676197918:
-                async for user in reaction.users():
-                    if not user.bot:
-                        users_who_reacted.append(user)
-                break
-
-        # 특정 역할 필터링
-        non_reactors = []
-        for role_id in TARGET_ROLE_IDS:
-            target_role = ctx.guild.get_role(role_id)
-            if target_role is not None:
-                members_with_role = [member for member in ctx.guild.members if target_role in member.roles]
-                non_reactors.extend([member for member in members_with_role if member not in users_who_reacted])
-
-        # 운영진 필터링
-        final_non_reactors = []
-        for member in non_reactors:
-            has_staff_role = any(staff_role_id in [role.id for role in member.roles] for staff_role_id in STAFF_ROLE_IDS)
-            if not has_staff_role:
-                final_non_reactors.append(member)
-
-        # 메시지 첫 줄 추출
-        first_line = notice_message.content.splitlines()[0]
-
-        # 미응답자 목록에서 줄바꿈 처리
-        non_reactors_list = "\n".join([member.display_name for member in final_non_reactors]).replace('\n', '\n> ')
-
-        # 통계 채널 변수 생성
-        statistics_channel = bot.get_channel(NOTICE_STATISTICS_CHANNEL_ID)
-        
-        # 미응답자 목록 출력
-        if final_non_reactors:
-            response = f"🔴 {first_line}\n## 미응답자 목록\n> {non_reactors_list}"
-            await statistics_channel.send(response)
-        else:
-            response = f"🔵 {first_line}\n> 모든 특정 역할의 사용자가 이모지를 달았습니다."
-            await statistics_channel.send(response)
-            
+        await send_notice_reaction_report(ctx.guild, message_id)
         await ctx.send("리액션 확인 완료!")
-        
     except discord.NotFound:
         await ctx.send(f"메시지 {message_id}를 찾을 수 없습니다.")
+    except RuntimeError as error:
+        await ctx.send(str(error))
 
 bot.run(DISCORD_BOT_TOKEN)

@@ -39,6 +39,7 @@ SCHEDULED_NOTICES_HEADERS = [
     "sent_message_id",
     "error",
 ]
+_WORKSHEETS_CACHE = None
 
 
 def _get_client():
@@ -64,6 +65,20 @@ def _get_spreadsheet():
     return _get_client().open_by_key(spreadsheet_id)
 
 
+def _get_appended_row_index(response):
+    updated_range = response.get("updates", {}).get("updatedRange", "")
+    row_match = re.search(r"!(?:[A-Z]+)?(\d+):", updated_range)
+
+    if row_match:
+        return int(row_match.group(1))
+
+    row_match = re.search(r"!(?:[A-Z]+)?(\d+)$", updated_range)
+    if row_match:
+        return int(row_match.group(1))
+
+    return None
+
+
 def _get_or_create_worksheet(spreadsheet, title, headers):
     try:
         worksheet = spreadsheet.worksheet(title)
@@ -78,8 +93,13 @@ def _get_or_create_worksheet(spreadsheet, title, headers):
 
 
 def get_worksheets():
+    global _WORKSHEETS_CACHE
+
+    if _WORKSHEETS_CACHE is not None:
+        return _WORKSHEETS_CACHE
+
     spreadsheet = _get_spreadsheet()
-    return {
+    _WORKSHEETS_CACHE = {
         MEMBERS_SHEET_NAME: _get_or_create_worksheet(spreadsheet, MEMBERS_SHEET_NAME, MEMBERS_HEADERS),
         SCORES_SHEET_NAME: _get_or_create_worksheet(spreadsheet, SCORES_SHEET_NAME, SCORES_HEADERS),
         SCHEDULED_NOTICES_SHEET_NAME: _get_or_create_worksheet(
@@ -88,6 +108,7 @@ def get_worksheets():
             SCHEDULED_NOTICES_HEADERS,
         ),
     }
+    return _WORKSHEETS_CACHE
 
 
 def sync_members(members):
@@ -156,9 +177,8 @@ def add_score(member, points, reason, created_by):
     members_worksheet = worksheets[MEMBERS_SHEET_NAME]
     scores_worksheet = worksheets[SCORES_SHEET_NAME]
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    score_row_index = len(scores_worksheet.get_all_values()) + 1
 
-    scores_worksheet.append_row([
+    append_response = scores_worksheet.append_row([
         now,
         member["user_id"],
         member["display_name"],
@@ -168,6 +188,7 @@ def add_score(member, points, reason, created_by):
         "pending",
         "",
     ])
+    score_row_index = _get_appended_row_index(append_response)
 
     rows = members_worksheet.get_all_records()
     for index, row in enumerate(rows, start=2):
@@ -182,6 +203,9 @@ def add_score(member, points, reason, created_by):
 
 
 def update_score_dm_result(row_index, success, message):
+    if row_index is None:
+        raise RuntimeError("DM 결과를 기록할 점수 row를 찾을 수 없습니다.")
+
     worksheets = get_worksheets()
     worksheet = worksheets[SCORES_SHEET_NAME]
     status = "sent" if success else "failed"
@@ -190,6 +214,29 @@ def update_score_dm_result(row_index, success, message):
     worksheet.update_cell(row_index, SCORES_HEADERS.index("dm_status") + 1, status)
     worksheet.update_cell(row_index, SCORES_HEADERS.index("dm_error") + 1, error)
     return True
+
+
+def mark_pending_score_dm_results_unknown():
+    worksheets = get_worksheets()
+    worksheet = worksheets[SCORES_SHEET_NAME]
+    rows = worksheet.get_all_records()
+    status_column = SCORES_HEADERS.index("dm_status") + 1
+    error_column = SCORES_HEADERS.index("dm_error") + 1
+    updated_count = 0
+
+    for index, row in enumerate(rows, start=2):
+        if str(row.get("dm_status", "")).strip().lower() != "pending":
+            continue
+
+        worksheet.update_cell(index, status_column, "unknown")
+        worksheet.update_cell(
+            index,
+            error_column,
+            "DM 전송 후 결과 기록 단계가 완료되지 않아 실제 전송 여부를 확인할 수 없습니다.",
+        )
+        updated_count += 1
+
+    return updated_count
 
 
 def reset_score(member, created_by):
@@ -225,6 +272,48 @@ def reset_score(member, created_by):
         members_worksheet.update_cell(member_row_index, MEMBERS_HEADERS.index("updated_at") + 1, now)
 
     return current_score
+
+
+def reset_all_scores(created_by):
+    worksheets = get_worksheets()
+    members_worksheet = worksheets[MEMBERS_SHEET_NAME]
+    scores_worksheet = worksheets[SCORES_SHEET_NAME]
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    rows = members_worksheet.get_all_records()
+    score_rows = []
+    member_rows = []
+
+    for row in rows:
+        user_id = str(row.get("user_id", "")).strip()
+        if not user_id:
+            continue
+
+        current_score = int(row.get("score") or 0)
+        score_rows.append([
+            now,
+            user_id,
+            row.get("display_name", ""),
+            -current_score,
+            "점수 초기화",
+            created_by,
+            "not_sent",
+            "",
+        ])
+        member_rows.append([
+            user_id,
+            row.get("display_name", ""),
+            row.get("name", ""),
+            row.get("roles", ""),
+            0,
+            now,
+        ])
+
+    if score_rows:
+        scores_worksheet.append_rows(score_rows)
+
+    members_worksheet.clear()
+    members_worksheet.update("A1", [MEMBERS_HEADERS] + member_rows)
+    return len(member_rows)
 
 
 def add_scheduled_notice(send_at, content, created_by):
