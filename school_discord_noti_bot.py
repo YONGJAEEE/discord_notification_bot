@@ -253,7 +253,7 @@ def build_score_dm_content(display_name, points, reason, dm_reason=None, custom_
         reason_text = (
             f"`{display_reason}`(으)로 인해, 상점 `{points}`점을 부여합니다."
             if custom_reason
-            else f"`{display_reason}` 상점 `{points}`점을 부여합니다."
+            else f"{display_reason} 상점 `{points}`점을 부여합니다."
         )
         return (
             f"안녕하세요 `{display_name}`, UMC 운영진입니다.\n"
@@ -325,30 +325,30 @@ SCORE_RULES = {
         "points": 3,
         "parameter": "week",
         "reason_template": "{week} 블로그 챌린지",
-        "dm_reason_template": "{week} 블로그 챌린지 참여로",
+        "dm_reason_template": "`{week} 블로그 챌린지` 참여로",
         "usage_param": "n주차",
     },
     "상점-베스트워크북": {
         "points": 2,
         "parameter": "week",
         "reason_template": "{week} 베스트 워크북 선정",
-        "dm_reason_template": "{week} 베스트 워크북에 선정되어,",
+        "dm_reason_template": "`{week} 베스트 워크북`에 선정되어,",
         "usage_param": "n주차",
     },
     "상점-행사리뷰어": {
         "points": 1,
         "reason": "행사 리뷰어",
-        "dm_reason": "행사 리뷰어 참여로",
+        "dm_reason": "`행사 리뷰어` 참여로",
     },
     "상점-중앙행사": {
         "points": 2,
         "reason": "중앙 행사 참여",
-        "dm_reason": "중앙 행사 참여로",
+        "dm_reason": "`중앙 행사` 참여로",
     },
     "상점-지식인": {
         "points": 1,
         "reason": "지식인 채널 활동",
-        "dm_reason": "지식인 채널 활동으로",
+        "dm_reason": "`지식인 채널 활동`으로",
     },
 }
 
