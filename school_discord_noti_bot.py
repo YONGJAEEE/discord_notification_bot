@@ -251,9 +251,9 @@ def build_score_dm_content(display_name, points, reason, dm_reason=None, custom_
 
     if points > 0:
         reason_text = (
-            f"`{display_reason}`(으)로 인해, 상점 `+{points}`점을 부여합니다."
+            f"`{display_reason}`(으)로 인해, 상점 `+{points}점`을 부여합니다."
             if custom_reason
-            else f"{display_reason} 상점 `+{points}`점을 부여합니다."
+            else f"{display_reason} 상점 `+{points}점`을 부여합니다."
         )
         return (
             f"안녕하세요 `{display_name}`, UMC 운영진입니다.\n"
