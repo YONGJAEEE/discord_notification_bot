@@ -409,6 +409,10 @@ def build_all_help_content():
     ])
 
 
+def normalize_member_display_name(display_name):
+    return str(display_name).split("-", 1)[0].strip()
+
+
 def get_score_command_usage():
     usages = []
     for command, rule in SCORE_RULES.items():
@@ -665,7 +669,7 @@ async def sync_members_command(ctx):
 
             target_members_by_id[member.id] = {
                 "user_id": member.id,
-                "display_name": member.display_name,
+                "display_name": normalize_member_display_name(member.display_name),
                 "name": str(member),
                 "roles": [
                     role.name
