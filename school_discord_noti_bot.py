@@ -422,7 +422,9 @@ def build_all_help_content():
 
 
 def normalize_member_display_name(display_name):
-    return re.sub(r"\s*-\s*", "/", str(display_name).strip())
+    normalized = re.sub(r"\s*[-/]\s*", "/", str(display_name).strip())
+    name_parts = [part.strip() for part in normalized.split("/") if part.strip()]
+    return "/".join(name_parts[:2])
 
 
 def get_score_command_usage():
