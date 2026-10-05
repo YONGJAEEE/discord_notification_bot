@@ -553,7 +553,7 @@ def parse_scheduled_notice_command_time(date_text, time_text):
         hour = int(time_match.group(1))
         minute = int(time_match.group(2) or 0)
 
-    return datetime(year, month, day, hour, minute)
+    return datetime(year, month, day, hour, minute, tzinfo=KOREA_TIMEZONE)
 
 
 async def handle_score_command(ctx, member_key, points, reason, expected_score_type=None, dm_reason=None, custom_reason=False):
@@ -645,6 +645,9 @@ async def register_scheduled_notice(ctx, send_at, message_content):
     if not can_send_dm(ctx.author):
         await ctx.send("예약 공지 등록 권한이 없습니다.")
         return
+
+    if send_at.tzinfo is None:
+        send_at = send_at.replace(tzinfo=KOREA_TIMEZONE)
 
     if send_at <= datetime.now(KOREA_TIMEZONE):
         await ctx.send("현재보다 이후 시간으로 예약해주세요.")
