@@ -2,6 +2,7 @@ import json
 import os
 import re
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import gspread
 
@@ -9,6 +10,7 @@ import gspread
 MEMBERS_SHEET_NAME = "members"
 SCORES_SHEET_NAME = "scores"
 SCHEDULED_NOTICES_SHEET_NAME = "scheduled_notices"
+KOREA_TIMEZONE = ZoneInfo("Asia/Seoul")
 
 MEMBERS_HEADERS = [
     "user_id",
@@ -114,7 +116,7 @@ def get_worksheets():
 def sync_members(members):
     worksheets = get_worksheets()
     worksheet = worksheets[MEMBERS_SHEET_NAME]
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now(KOREA_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
 
     existing_rows = worksheet.get_all_records()
     existing_scores = {
@@ -176,7 +178,7 @@ def add_score(member, points, reason, created_by):
     worksheets = get_worksheets()
     members_worksheet = worksheets[MEMBERS_SHEET_NAME]
     scores_worksheet = worksheets[SCORES_SHEET_NAME]
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now(KOREA_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
 
     append_response = scores_worksheet.append_row([
         now,
@@ -243,7 +245,7 @@ def reset_score(member, created_by):
     worksheets = get_worksheets()
     members_worksheet = worksheets[MEMBERS_SHEET_NAME]
     scores_worksheet = worksheets[SCORES_SHEET_NAME]
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now(KOREA_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
 
     rows = members_worksheet.get_all_records()
     current_score = 0
@@ -278,7 +280,7 @@ def reset_all_scores(created_by):
     worksheets = get_worksheets()
     members_worksheet = worksheets[MEMBERS_SHEET_NAME]
     scores_worksheet = worksheets[SCORES_SHEET_NAME]
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now(KOREA_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
     rows = members_worksheet.get_all_records()
     score_rows = []
     member_rows = []
@@ -319,13 +321,15 @@ def reset_all_scores(created_by):
 def add_scheduled_notice(send_at, content, created_by):
     worksheets = get_worksheets()
     worksheet = worksheets[SCHEDULED_NOTICES_SHEET_NAME]
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now(KOREA_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    if send_at.tzinfo is None:
+        send_at = send_at.replace(tzinfo=KOREA_TIMEZONE)
     rows = worksheet.get_all_records()
     next_id = max([int(row.get("id") or 0) for row in rows] or [0]) + 1
 
     worksheet.append_row([
         next_id,
-        send_at.strftime("%Y-%m-%d %H:%M:%S"),
+        send_at.astimezone(KOREA_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
         content,
         "pending",
         created_by,
@@ -352,14 +356,49 @@ def get_pending_scheduled_notices():
 
 
 def parse_scheduled_notice_time(value):
-    return datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S")
+    parsed_time = datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S")
+    return parsed_time.replace(tzinfo=KOREA_TIMEZONE)
+
+
+def get_scheduled_notice_status_by_id(scheduled_notice_id):
+    worksheets = get_worksheets()
+    rows = worksheets[SCHEDULED_NOTICES_SHEET_NAME].get_all_records()
+
+    for row in rows:
+        if str(row.get("id")) == str(scheduled_notice_id):
+            return str(row.get("status", "")).strip().lower()
+
+    return None
+
+
+def cancel_scheduled_notice_by_id(scheduled_notice_id):
+    worksheets = get_worksheets()
+    worksheet = worksheets[SCHEDULED_NOTICES_SHEET_NAME]
+    rows = worksheet.get_all_records()
+
+    for index, row in enumerate(rows, start=2):
+        if str(row.get("id")) != str(scheduled_notice_id):
+            continue
+
+        current_status = str(row.get("status", "")).strip().lower()
+        if current_status != "pending":
+            return current_status
+
+        worksheet.update_cell(
+            index,
+            SCHEDULED_NOTICES_HEADERS.index("status") + 1,
+            "cancelled",
+        )
+        return "cancelled"
+
+    return None
 
 
 def update_scheduled_notice_status_by_id(scheduled_notice_id, status, sent_message_id="", error=""):
     worksheets = get_worksheets()
     worksheet = worksheets[SCHEDULED_NOTICES_SHEET_NAME]
     rows = worksheet.get_all_records()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now(KOREA_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
 
     for index, row in enumerate(rows, start=2):
         if str(row.get("id")) == str(scheduled_notice_id):
@@ -375,7 +414,7 @@ def update_scheduled_notice_status_by_id(scheduled_notice_id, status, sent_messa
 def update_scheduled_notice_status(row_index, status, sent_message_id="", error=""):
     worksheets = get_worksheets()
     worksheet = worksheets[SCHEDULED_NOTICES_SHEET_NAME]
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now(KOREA_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
 
     worksheet.update_cell(row_index, SCHEDULED_NOTICES_HEADERS.index("status") + 1, status)
     worksheet.update_cell(row_index, SCHEDULED_NOTICES_HEADERS.index("sent_at") + 1, now)

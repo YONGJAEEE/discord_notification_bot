@@ -5,14 +5,17 @@ import os
 import re
 import typing
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from dm_sender import send_direct_message
 from env_loader import load_env_file
 from spreadsheet_store import (
     add_scheduled_notice,
     add_score,
+    cancel_scheduled_notice_by_id,
     find_member,
     get_pending_scheduled_notices,
+    get_scheduled_notice_status_by_id,
     mark_pending_score_dm_results_unknown,
     parse_scheduled_notice_time,
     reset_all_scores,
@@ -63,6 +66,7 @@ TARGET_ROLE_IDS = get_required_int_list_env("TARGET_ROLE_IDS")
 STAFF_ROLE_IDS = get_required_int_list_env("STAFF_ROLE_IDS")
 NOTICE_CONFIRM_EMOJI_ID = 1019827185676197918
 NOTICE_CONFIRM_EMOJI_TEXT = "<:gachon:1019827185676197918>"
+KOREA_TIMEZONE = ZoneInfo("Asia/Seoul")
 
 @bot.event
 async def on_ready():
@@ -108,7 +112,7 @@ def schedule_notice_reaction_check_task(guild, message_id):
 
 async def run_scheduled_notice(scheduled_notice_id, send_at, message_content):
     try:
-        delay = max((send_at - datetime.now()).total_seconds(), 0)
+        delay = max((send_at - datetime.now(KOREA_TIMEZONE)).total_seconds(), 0)
         if delay > 0:
             await asyncio.sleep(delay)
 
@@ -130,6 +134,13 @@ async def run_notice_reaction_check(guild, message_id):
 
 async def send_scheduled_notice(scheduled_notice_id, message_content):
     try:
+        status = await asyncio.to_thread(
+            get_scheduled_notice_status_by_id,
+            scheduled_notice_id,
+        )
+        if status != "pending":
+            return
+
         await asyncio.to_thread(
             update_scheduled_notice_status_by_id,
             scheduled_notice_id,
@@ -375,7 +386,8 @@ BONUS_HELP_ITEMS = [
 
 NOTICE_HELP_ITEMS = [
     ("!공지 공지글", "챌린저_공지 채널에 공지를 발송하고 확인 이모지를 추가합니다."),
-    ("!공지-예약 2026-09-10 21:00 공지글", "지정한 시간에 공지를 예약 발송합니다."),
+    ("!공지-예약 2026-09-10 21:00 공지글", "대한민국 시간(KST)으로 예약 공지를 등록하고 취소 ID를 안내합니다."),
+    ("!공지-예약취소 예약ID", "발송 전 예약 공지를 취소합니다."),
     ("!공지 메시지ID 수정할공지글", "기존 공지 메시지를 수정합니다."),
     ("!check 메시지ID", "해당 공지의 확인 이모지 미응답자를 수동 확인합니다."),
 ]
@@ -410,7 +422,7 @@ def build_all_help_content():
 
 
 def normalize_member_display_name(display_name):
-    return str(display_name).split("-", 1)[0].strip()
+    return re.sub(r"\s*-\s*", "/", str(display_name).strip())
 
 
 def get_score_command_usage():
@@ -508,7 +520,7 @@ async def build_score_context(ctx, rule, extra):
 
 
 def parse_scheduled_notice_command_time(date_text, time_text):
-    now = datetime.now()
+    now = datetime.now(KOREA_TIMEZONE)
     date_text = date_text.strip()
     time_text = time_text.strip()
 
@@ -632,7 +644,7 @@ async def register_scheduled_notice(ctx, send_at, message_content):
         await ctx.send("예약 공지 등록 권한이 없습니다.")
         return
 
-    if send_at <= datetime.now():
+    if send_at <= datetime.now(KOREA_TIMEZONE):
         await ctx.send("현재보다 이후 시간으로 예약해주세요.")
         return
 
@@ -643,7 +655,46 @@ async def register_scheduled_notice(ctx, send_at, message_content):
         str(ctx.author),
     )
     schedule_notice_task(scheduled_notice_id, send_at, message_content)
-    await ctx.send(f"예약 공지 #{scheduled_notice_id} 등록 완료: {send_at:%Y-%m-%d %H:%M}")
+    await ctx.send(
+        f"예약 공지 #{scheduled_notice_id} 등록 완료: "
+        f"{send_at.astimezone(KOREA_TIMEZONE):%Y-%m-%d %H:%M} (대한민국 시간)\n"
+        f"취소하려면 `!공지-예약취소 {scheduled_notice_id}`를 입력하세요."
+    )
+
+
+@bot.command(name='notice-schd-cancel', aliases=['공지-예약취소'])
+async def cancel_scheduled_notice(ctx, scheduled_notice_id: int):
+    if not can_send_dm(ctx.author):
+        await ctx.send("예약 공지 취소 권한이 없습니다.")
+        return
+
+    result = await asyncio.to_thread(
+        cancel_scheduled_notice_by_id,
+        scheduled_notice_id,
+    )
+
+    if result is None:
+        await ctx.send(f"예약 공지 #{scheduled_notice_id}를 찾을 수 없습니다.")
+        return
+
+    if result != "cancelled":
+        status_messages = {
+            "sent": "이미 발송된 예약 공지입니다.",
+            "sending": "현재 발송 중인 예약 공지라 취소할 수 없습니다.",
+            "failed": "이미 발송에 실패한 예약 공지입니다.",
+            "cancelled": "이미 취소된 예약 공지입니다.",
+        }
+        await ctx.send(
+            f"예약 공지 #{scheduled_notice_id}를 취소할 수 없습니다. "
+            f"{status_messages.get(result, f'현재 상태: {result}')}"
+        )
+        return
+
+    task = scheduled_notice_tasks.pop(scheduled_notice_id, None)
+    if task is not None and not task.done():
+        task.cancel()
+
+    await ctx.send(f"예약 공지 #{scheduled_notice_id}를 취소했습니다.")
 
 
 @bot.command(name='sync-members')
@@ -670,7 +721,7 @@ async def sync_members_command(ctx):
             target_members_by_id[member.id] = {
                 "user_id": member.id,
                 "display_name": normalize_member_display_name(member.display_name),
-                "name": str(member),
+                "name": str(member.name).strip(),
                 "roles": [
                     role.name
                     for role in member.roles
@@ -806,7 +857,7 @@ async def recover_dm_status(ctx):
 @bot.command(name='notice-schd')
 async def notice_schd(ctx, year: int, month: int, day: int, hour: int, minute: int, *, message_content):
     try:
-        send_at = datetime(year, month, day, hour, minute)
+        send_at = datetime(year, month, day, hour, minute, tzinfo=KOREA_TIMEZONE)
     except ValueError:
         await ctx.send("예약 날짜/시간 형식이 올바르지 않습니다.")
         return
