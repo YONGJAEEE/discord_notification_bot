@@ -67,6 +67,8 @@ STAFF_ROLE_IDS = get_required_int_list_env("STAFF_ROLE_IDS")
 NOTICE_CONFIRM_EMOJI_ID = 1019827185676197918
 NOTICE_CONFIRM_EMOJI_TEXT = "<:gachon:1019827185676197918>"
 KOREA_TIMEZONE = ZoneInfo("Asia/Seoul")
+NOTICE_MENTION_PATTERN = re.compile(r"@(?:everyone|here)\b", re.IGNORECASE)
+NOTICE_MARKDOWN_PATTERN = re.compile(r"[#<>*`_~|\[\]()+\-]")
 
 @bot.event
 async def on_ready():
@@ -182,7 +184,14 @@ async def send_scheduled_notice(scheduled_notice_id, message_content):
 
 def get_first_line(message_content):
     lines = str(message_content).splitlines()
-    return lines[0] if lines else ""
+
+    for line in lines:
+        if NOTICE_MENTION_PATTERN.search(line):
+            continue
+
+        return NOTICE_MARKDOWN_PATTERN.sub("", line).strip()
+
+    return ""
 
 
 async def fetch_challenger_notice_message(message_id):
@@ -892,7 +901,7 @@ async def notice(ctx, message_id: typing.Optional[int], *, message_content):
     if message_id is None:
         # 새 공지 생성 로직
         notice_message = await challenger_notice_channel.send(message_content)
-        await ctx.send(f"{message_content.splitlines()[0]} 공지의 메시지 ID: {notice_message.id}")
+        await ctx.send(f"{get_first_line(message_content)} 공지의 메시지 ID: {notice_message.id}")
         
         # 커스텀 이모지 사용하도록 설정
         await notice_message.add_reaction(NOTICE_CONFIRM_EMOJI_TEXT)
